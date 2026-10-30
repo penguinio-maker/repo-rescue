@@ -22,3 +22,6 @@ backups/
 repo-rescue-report*.json
 repo-rescue-checkpoint*.md
 REPO_RESCUE_HANDOFF*.md
+*.jsonl
+session-inventory*.json
+session-recovery*.json

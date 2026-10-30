@@ -21,6 +21,9 @@ development of Repo Rescue, not projects inspected by the installed skill.
 
 Keep the scanner standard-library-only and read-only. Never execute discovered
 project commands. Preserve explicit checkpoint approval in SKILL.md. Do not add
-telemetry, network calls, session recovery, or automatic report persistence to v0.1.
+telemetry, network calls, or automatic report persistence. Optional v0.2 session
+recovery must stay in its separate module, disabled by default, with project opt-in
+and a separate inventory-bound transcript approval. Test only generated synthetic
+history; never inspect real Codex history during development or publish transcripts.
 Use a public GitHub handle and a GitHub noreply email for commits after verifying
 the account; do not change global Git identity.

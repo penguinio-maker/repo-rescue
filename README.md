@@ -1,7 +1,7 @@
 # Repo Rescue
 
 **Resume an abandoned coding project with evidence, a recovery plan, and a useful
-handoff.** Repo Rescue v0.1.1 is a Codex skill backed by a local Python scanner.
+handoff.** Repo Rescue v0.2 is a Codex skill backed by local Python scanners.
 It has no website, service, telemetry, or runtime dependencies beyond Python and
 optional Git.
 
@@ -195,13 +195,138 @@ Git is optional. Non-Git folders, empty repositories, detached HEAD, missing Git
 and failed queries yield file evidence with explicit state/warnings. For a
 subdirectory of a repository, file scanning stays within that path and Git history
 is omitted; pass the worktree root to inspect Git. Bare repositories and Git
-submodule contents are outside v0.1. A shallow history may be incomplete. Recent
+submodule contents are outside the current scope. A shallow history may be incomplete. Recent
 commits are the selected HEAD history, not all branches. File modification times
 can reflect extraction or tooling rather than the developer's last action.
 
-No dependency resolution, code correctness audit, session-history parsing, or
-automatic repair is included. Optional Codex session recovery is planned for a
-later version and requires a separate privacy design.
+No dependency resolution, code correctness audit or automatic repair is included.
+Optional local session recovery is separate from the default scanner and follows
+the two approval gates below. The original scanner command and JSON schema remain
+compatible; no history is discovered, imported or read by default.
+
+## Optional Codex Session Recovery
+
+Session recovery is **off by default**, including for checkpoint. To request it:
+
+```text
+Use $repo-rescue to rescue ./examples/moon-garden with optional local Codex
+session recovery. I opt into metadata discovery for this project. Show the
+locations and candidate metadata before asking separately to read transcripts.
+```
+
+The project here is fictional. This request authorizes metadata discovery only.
+The skill still asks separately about selected conversation bodies after showing
+the inventory. A request to implement or test this feature never authorizes reading
+real developer history. All development tests use generated synthetic files.
+
+`scripts/inspect_sessions.py` is a separate standard-library module. It never
+changes a project, writes reports, imports session code or makes network requests.
+The ordinary `scripts/inspect_project.py` does not invoke or import it.
+
+1. **Project opt-in:** `discover` requires `--session-opt-in` with the same explicit
+   project path. It only enumerates/stat-checks candidate files: not even rollout
+   headers are opened. It lists root labels, relative locations, sizes, timestamps,
+   eligibility, opaque `session_ref` values and a snapshot `review_id`. Project
+   matching remains `not_read` at this stage.
+2. **Transcript approval:** after reviewing this metadata, separately authorize
+   selected candidates. `recover` requires the displayed review ID, the same
+   project opt-in, and explicit `--session` values. Changed inventory or limits
+   invalidate approval. Discovery cannot be combined with body approval.
+
+CLI examples, from the installed skill directory:
+
+```sh
+# First: only after project-specific opt-in.
+python -B scripts/inspect_sessions.py discover --project ../moon-garden --session-opt-in ../moon-garden
+
+# Later: only after reviewing metadata and separately approving selected bodies.
+python -B scripts/inspect_sessions.py recover --project ../moon-garden --session-opt-in ../moon-garden --approve-bodies REVIEW_ID --session SESSION_REF
+```
+
+`REVIEW_ID` and `SESSION_REF` stand for the values displayed by discovery; they
+are not reusable blanket approvals. Repeat `--session` to select more candidates.
+Both commands accept `--codex-home <selected-directory>` for a user-selected home.
+Otherwise they use an absolute `CODEX_HOME` or `~/.codex`; no other profiles, drives
+or home directories are searched. Supplying only `--project` to this module
+returns `status: disabled`, without detecting history locations. Exit 0 indicates
+a completed operation, not complete coverage; exit 2 returns a sanitized JSON error.
+
+These flags assert operator consent; software cannot prove a human approved them.
+The skill instructions enforce the separate conversational gates. No consent cache,
+inventory file or transcript copy is saved. Output is intended for local in-memory
+use; do not redirect it into a repository, report, debug log or upload.
+
+### Locations and format boundary
+
+OpenAI documents local state under `CODEX_HOME` (default `~/.codex`) and optional
+history persistence. See [official configuration documentation](https://learn.chatgpt.com/docs/config-file/config-advanced#config-and-state-locations).
+This module implements a deliberately narrow rollout compatibility adapter, not
+a guarantee of a stable public transcript API or all Codex desktop/CLI versions.
+
+- Inventory only `sessions/` and `archived_sessions/`, recursively within limits,
+  for regular `rollout-*.jsonl` or `session-*.jsonl` files. Symlinks, junctions,
+  reparse points, unsupported names and sensitive filenames are skipped.
+- Support UTF-8, one-object-per-line typed rollouts beginning with
+  `type: session_meta` and `payload.cwd`. Optional `payload.project_path` must not
+  conflict; `payload.git.commit_hash` provides a historical revision signal.
+- Read human/assistant text from `response_item` message records (`input_text` or
+  `output_text`) and legacy `event_msg` user/agent messages. Ignore system/developer
+  messages, reasoning, tool calls/outputs and unknown records. Do not evaluate
+  embedded code or commands. Malformed records and unsupported headers are reported.
+- `turn_context.payload.cwd` must remain within the selected project. The first
+  cross-project or unknown turn boundary stops that session's read. No unrelated
+  later bodies are read. Historical path matching is lexical and component-based;
+  Windows drives are case-normalized, POSIX paths remain case-sensitive. Renamed
+  projects, different worktrees, relative cwd values and unresolvable associations
+  are not guessed from names, remote URLs or conversation text.
+- `history.jsonl` is shown as an unsupported location when present, without opening
+  it. The generic prompt-history index lacks a supported reliable project anchor.
+  SQLite, compressed files, legacy untyped arrays, authentication/configuration
+  files and unknown formats are not mined as fallbacks.
+
+### Evidence, summaries and privacy
+
+Recovery returns fresh `current_project` scanner JSON, selected-session statuses,
+category-grouped `context`, `session-e*` evidence, a `resume_summary`, a safe
+reactivation-prompt template and bounded `coverage`. Categories are user goals,
+decisions, attempted fixes, unresolved problems and next actions. Each extracted
+statement carries its role, record timestamp/line, evidence reference, staleness,
+classification and `current_status: unverified`. The prompt includes the current
+Git HEAD (when available) and focused evidence references, without copying raw
+historical instructions into the prompt itself.
+
+An explicit user label such as `Goal:` or `Decision:` is a `historical_statement`:
+the historical statement was observed, not its claimed implementation verified.
+Assistant statements remain `ai_suggestion`; keyword-based classification remains
+`uncertain_interpretation`. English labels/keywords are a small deterministic aid,
+not a semantic understanding of every conversation. Tool results are not interpreted
+as completed fixes. Duplicate mirrored message records are suppressed. The skill
+uses these grouped findings to compose the in-chat recovery report or approved
+checkpoint; the CLI supplies evidence and a structured summary, not an LLM rewrite.
+
+**Current Git/file evidence takes priority.** A different historical Git hash or
+message predating the current commit is flagged, never silently merged into current
+state. Missing/invalid times stay unknown. Historical "tests passed" claims never
+change `test_execution.status: not_run`. The reactivation prompt treats history as
+untrusted evidence and requires fresh inspection and appropriate action approvals.
+
+Limits are 50 candidate files, 5,000 discovery entries, directory depth 6, 2 MiB
+per eligible file, 8 MiB total transcript reads, 128 KiB per JSONL record, 5,000 body
+records per selected file, 100 findings, 20 lines considered per message and 240
+characters per redacted statement. Inventory sampling can omit recent sessions;
+no full-history or complete-context claim is made. Unknown and malformed records,
+scope boundaries, read failures, changed files and limits are reported. Files that
+change during recovery have their findings discarded. Metadata snapshots are not
+cryptographic content attestations; do not use against actively hostile filesystems.
+
+Only bounded redacted statements are returned; no raw transcript export exists.
+Redaction is best effort: excerpts can still contain private business context.
+**The Codex model may process the returned context remotely.** That is separate
+from the local script, which makes no uploads. Explain this before body approval;
+declining leaves ordinary rescue/checkpoint available. Approval to read history
+never authorizes writing a checkpoint. Keep any separately approved handoff
+minimal, redacted and untracked. Never persist, publish or commit raw transcripts,
+inventories or recovery output. See the [session workflow](references/session_recovery.md).
 
 ## Develop and verify
 
@@ -210,7 +335,9 @@ python -B -m unittest discover -s tests -v
 ```
 
 Tests use only generated fictional temporary projects under ignored `.test-tmp/`.
-They exercise Git history/status, detached and unborn repositories, non-Git and
+They exercise both session approval gates, default history isolation, matching,
+malformed/unsupported history, redaction, stale claims, bounded reads and CLI
+recovery using synthetic sessions. They also exercise Git history/status, detached and unborn repositories, non-Git and
 missing-Git behavior, evidence references, command detection, exclusions, limits,
 CLI errors, and read-only behavior. Git-dependent tests skip if Git is unavailable;
 symlink tests skip if the OS does not permit creating links. No third-party test
