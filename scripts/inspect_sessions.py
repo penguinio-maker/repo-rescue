@@ -2,6 +2,7 @@
 """Optional, two-gate local Codex rollout recovery. No writes or network calls."""
 
 import argparse
+import base64
 from collections import Counter
 from datetime import datetime, timezone
 import hashlib
@@ -28,6 +29,8 @@ MAX_LINE_BYTES = 128 * 1024
 MAX_RECORDS = 5000
 MAX_FINDINGS = 100
 MAX_SNIPPET = 240
+MAX_METADATA_BYTES = 64 * 1024
+MAX_METADATA_TOTAL_BYTES = 1024 * 1024
 FILE_NAME = re.compile(r"(?:rollout|session)-[A-Za-z0-9_.-]+\.jsonl$")
 LABELS = {
     "goal": "user_goals", "decision": "decisions", "tried": "attempted_fixes",
@@ -60,10 +63,27 @@ def timestamp(value):
 
 def path_key(value):
     """Lexical absolute paths only; never probe a historic path on disk."""
-    if not isinstance(value, str) or not value or len(value) > 4096 or "\0" in value:
+    if (not isinstance(value, str) or not value or len(value) > 4096
+            or any(ord(char) < 32 for char in value)):
         return None
-    if re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("\\\\"):
-        return ntpath.normcase(ntpath.normpath(value)).replace("\\", "/")
+    windows = value.replace("/", "\\")
+    if windows.startswith("\\\\.\\"):
+        return None  # Device paths are not project anchors.
+    if windows.startswith("\\\\?\\"):
+        windows = windows[4:]
+        if windows.upper().startswith("UNC\\"):
+            windows = "\\\\" + windows[4:]
+        elif not re.match(r"^[A-Za-z]:\\", windows):
+            return None
+    if re.match(r"^[A-Za-z]:\\", windows) or windows.startswith("\\\\"):
+        if windows.startswith("\\\\"):
+            parts = windows[2:].split("\\")
+            if len(parts) < 2 or any(part in {"", ".", "..", "?"} for part in parts[:2]):
+                return None
+        _, tail = ntpath.splitdrive(windows)
+        if ":" in tail:
+            return None
+        return ntpath.normcase(ntpath.normpath(windows)).replace("\\", "/")
     if value.startswith("/") and not value.startswith("//"):
         return posixpath.normpath(value)
     return None
@@ -71,7 +91,7 @@ def path_key(value):
 
 def within(value, project):
     key = path_key(value)
-    return key is not None and (key == project or key.startswith(project.rstrip("/") + "/"))
+    return key is not None and isinstance(project, str) and (key == project or key.startswith(project.rstrip("/") + "/"))
 
 
 def match_project(metadata, project):
@@ -125,7 +145,7 @@ def identity(info):
     return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
 
 
-def discover(project, *, opt_in_project=None, codex_home=None):
+def discover(project, *, opt_in_project=None, codex_home=None, cursor=None):
     """Stat-only inventory. Never open a transcript, config, credential or database."""
     root = project_consent(project, opt_in_project)
     home, label = history_home(codex_home)
@@ -193,10 +213,6 @@ def discover(project, *, opt_in_project=None, codex_home=None):
                                 "snapshot": identity(info), "project_match": "not_read",
                                 "body_eligible": info.st_size <= MAX_FILE_BYTES,
                                 "format": "typed_rollout_jsonl_candidate"})
-                            if len(candidates) >= MAX_FILES:
-                                counts["file_limit"] += 1
-                                stack.clear()
-                                break
                         else:
                             counts["unsupported_entry"] += 1
                     except OSError:
@@ -207,17 +223,199 @@ def discover(project, *, opt_in_project=None, codex_home=None):
     # Snapshot binds approval to this project, root, selected catalogue and limits.
     limits = {"files": MAX_FILES, "entries": MAX_ENTRIES, "depth": MAX_DEPTH,
               "file_bytes": MAX_FILE_BYTES, "total_bytes": MAX_TOTAL_BYTES,
-              "line_bytes": MAX_LINE_BYTES, "records_per_file": MAX_RECORDS, "findings": MAX_FINDINGS}
-    material = [str(root), str(home), locations, candidates, dict(counts), limits]
+              "line_bytes": MAX_LINE_BYTES, "records_per_file": MAX_RECORDS, "findings": MAX_FINDINGS,
+              "metadata_file_bytes": MAX_METADATA_BYTES, "metadata_batch_bytes": MAX_METADATA_TOTAL_BYTES}
+    scope = hashlib.sha256(json.dumps([str(root), str(home), limits], sort_keys=True).encode()).hexdigest()
+    # Page position depends on membership/order, not appends to live transcripts.
+    # Body approvals below still bind full size/mtime snapshots for the page.
+    inventory = hashlib.sha256(json.dumps([[c["path"], c["snapshot"][:2]] for c in candidates],
+                                         sort_keys=True).encode()).hexdigest()
+    offset = 0
+    if cursor is not None:
+        try:
+            if not isinstance(cursor, str) or len(cursor) > 2048:
+                raise ValueError
+            page = json.loads(base64.b64decode(cursor, validate=True))
+            if not isinstance(page, dict) or page.get("scope") != scope or page.get("inventory") != inventory:
+                raise SessionError("inventory_changed_restart_pagination")
+            offset = page.get("offset")
+            if type(offset) is not int or offset < 0 or offset > len(candidates) or offset % MAX_FILES:
+                raise ValueError
+        except SessionError:
+            raise
+        except (ValueError, UnicodeError, RecursionError):
+            raise SessionError("invalid_cursor") from None
+    total = len(candidates)
+    candidates = candidates[offset:offset + MAX_FILES]
+    next_cursor = None
+    if offset + MAX_FILES < total:
+        counts["file_limit"] += 1  # Compatibility: this is a page limit, not a permanent stop.
+        next_cursor = base64.b64encode(json.dumps({"scope": scope, "inventory": inventory,
+                                                 "offset": offset + MAX_FILES}, sort_keys=True).encode()).decode()
+    pagination = {"cursor": cursor, "offset": offset, "batch_size": MAX_FILES, "returned": len(candidates),
+                  "catalogued": total, "next_cursor": next_cursor}
+    material = [str(root), str(home), locations, candidates, dict(counts), limits, pagination, inventory]
     review_id = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
     return {"schema_version": "1.0", "status": "body_approval_required", "project": ".",
             "review_id": review_id, "locations": locations, "candidates": candidates,
+            "pagination": pagination,
             "bodies_read": False, "coverage": {"complete": False, "entries_visited": min(visited, MAX_ENTRIES),
                 "omissions": dict(counts), "limits": limits,
                 "scope": "Filesystem metadata only; project matching not yet performed."},
             "privacy_notice": "Recovery is optional per project. Approve selected session_ref values in a separate step. "
                 "Redacted excerpts may contain private context and may be processed remotely by your Codex model. "
                 "No transcript is uploaded or persisted by this script."}
+
+
+class MetadataReader:
+    """No read-ahead: stop at the initial metadata object, or before unknown payloads."""
+    def __init__(self):
+        self.bytes_read = 0
+
+    def record(self, source):
+        data = bytearray()
+
+        def take():
+            if len(data) >= MAX_METADATA_BYTES:
+                raise SessionError("metadata_file_byte_limit")
+            if self.bytes_read >= MAX_METADATA_TOTAL_BYTES:
+                raise SessionError("metadata_batch_byte_limit")
+            byte = source.read(1)
+            if not byte:
+                raise SessionError("truncated_metadata")
+            self.bytes_read += 1
+            data.extend(byte)
+            if byte in {b"\n", b"\r"}:
+                raise SessionError("malformed_initial_metadata")
+            return byte
+
+        def nonspace():
+            byte = take()
+            while byte in {b" ", b"\t"}:
+                byte = take()
+            return byte
+
+        def string(first, limit):
+            if first != b'"':
+                raise SessionError("unsupported_metadata_prefix")
+            raw = bytearray(first)
+            escaped = False
+            while len(raw) <= limit:
+                byte = take()
+                raw.extend(byte)
+                if byte == b'"' and not escaped:
+                    try:
+                        return json.loads(raw.decode("utf-8"))
+                    except (ValueError, UnicodeError):
+                        raise SessionError("malformed_initial_metadata") from None
+                escaped = byte == b"\\" and not escaped
+            raise SessionError("unsupported_metadata_prefix")
+
+        if nonspace() != b"{":
+            raise SessionError("unsupported_metadata_prefix")
+        while True:
+            key = string(nonspace(), 128)
+            if nonspace() != b":":
+                raise SessionError("malformed_initial_metadata")
+            if key == "type":
+                if string(nonspace(), 64) != "session_meta":
+                    raise SessionError("unsupported_initial_record")
+                break
+            if key != "timestamp":
+                # Reject payload-before-type without consuming its value.
+                raise SessionError("unsupported_metadata_prefix")
+            string(nonspace(), 128)
+            if nonspace() != b",":
+                raise SessionError("malformed_initial_metadata")
+        stack, quoted, escaped = [b"{"], False, False
+        while stack:
+            byte = take()
+            if quoted:
+                if byte == b'"' and not escaped:
+                    quoted = False
+                escaped = byte == b"\\" and not escaped
+            elif byte == b'"':
+                quoted, escaped = True, False
+            elif byte in {b"{", b"["}:
+                stack.append(byte)
+                if len(stack) > 64:
+                    raise SessionError("malformed_initial_metadata")
+            elif byte in {b"}", b"]"}:
+                if stack.pop() != (b"{" if byte == b"}" else b"["):
+                    raise SessionError("malformed_initial_metadata")
+
+        def unique_fields(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+        try:
+            record = json.loads(data.decode("utf-8"), object_pairs_hook=unique_fields)
+            if record.get("type") != "session_meta" or not isinstance(record.get("payload"), dict):
+                raise ValueError
+        except (ValueError, UnicodeError, RecursionError):
+            raise SessionError("malformed_initial_metadata") from None
+        return record, hashlib.sha256(data).hexdigest()
+
+
+def match_metadata(project, *, opt_in_project=None, metadata_approval_project=None, codex_home=None, cursor=None):
+    root = project_consent(project, opt_in_project)
+    if metadata_approval_project is None:
+        raise SessionError("metadata_approval_required")
+    project_consent(root, metadata_approval_project)
+    report = discover(root, opt_in_project=root, codex_home=codex_home, cursor=cursor)
+    home, _ = history_home(codex_home)
+    key = path_key(str(root))
+    reader = MetadataReader()
+    counts = Counter({name: 0 for name in ("matched", "unmatched", "unresolved", "unsupported")})
+    reasons = Counter()
+    for candidate in report["candidates"]:
+        candidate.update(project_match="unresolved", confidence="none")
+        try:
+            path = checked_path(home / candidate["path"])
+            if identity(path.lstat()) != candidate["snapshot"]:
+                raise SessionError("session_changed")
+            with path.open("rb", buffering=0) as source:
+                record, digest = reader.record(source)
+            if identity(path.lstat()) != candidate["snapshot"]:
+                raise SessionError("session_changed")
+            metadata = record["payload"]
+            cwd = path_key(metadata.get("cwd"))
+            project_path = path_key(metadata.get("project_path"))
+            started = timestamp(metadata.get("timestamp")) or timestamp(record.get("timestamp"))
+            candidate.update(session_started_at=started.isoformat() if started else None, header_digest=digest)
+            if cwd is None or ("project_path" in metadata and project_path is None):
+                reason = "missing_or_invalid_project_anchor"
+            elif not within(cwd, key) or (project_path is not None and project_path != key):
+                candidate["project_match"], reason = "unmatched", "different_or_conflicting_project_anchor"
+            else:
+                basis = match_project(metadata, key)
+                candidate.update(project_match="matched", match_basis=basis,
+                    confidence="high" if basis == "cwd_exact" or project_path == key else "medium",
+                    metadata={"cwd": "[PROJECT]" if cwd == key else "[PROJECT_SUBDIRECTORY]",
+                              "project_path": "[PROJECT]" if project_path == key else None},
+                    metadata_evidence={"source": "session_metadata", "path": candidate["path"], "line": 1,
+                                       "timestamp": started.isoformat() if started else None, "match_basis": basis})
+                reason = "structured_project_anchor_match"
+            candidate["match_reason"] = reason
+        except SessionError as error:
+            reason = error.code
+            candidate["project_match"] = ("unsupported" if reason.startswith(("unsupported_", "malformed_", "truncated_")) else "unresolved")
+            candidate["match_reason"] = reason
+        except OSError:
+            candidate["match_reason"] = "unreadable_metadata"
+        counts[candidate["project_match"]] += 1
+        reasons[candidate["match_reason"]] += 1
+    # Bind body approval to this page and its whitelisted, matching metadata.
+    report["review_id"] = hashlib.sha256(json.dumps([report["review_id"], report["candidates"]], sort_keys=True).encode()).hexdigest()
+    report.update(status="body_approval_required" if counts["matched"] else "no_matching_sessions",
+                  matching_sessions=[c for c in report["candidates"] if c["project_match"] == "matched"],
+                  match_counts=dict(counts), bodies_read=False, metadata_records_only=True)
+    report["coverage"].update(metadata_bytes_read=reader.bytes_read, matching_reasons=dict(reasons),
+                             scope="Initial session_meta records only, for this page. No conversation bodies read.")
+    return report
 
 
 class RecordReader:
@@ -303,15 +501,22 @@ def staleness(time, recorded_head, current):
     return "historical_unverified"
 
 
-def recover(project, *, opt_in_project=None, review_id=None, session_refs=(), codex_home=None):
+def recover(project, *, opt_in_project=None, review_id=None, session_refs=(), codex_home=None,
+            metadata_approval_project=None, cursor=None):
     root = project_consent(project, opt_in_project)
     if not review_id or not session_refs:
         raise SessionError("body_approval_required")
-    inventory = discover(root, opt_in_project=root, codex_home=codex_home)
+    if metadata_approval_project is None:
+        inventory = discover(root, opt_in_project=root, codex_home=codex_home, cursor=cursor)
+    else:
+        inventory = match_metadata(root, opt_in_project=root, metadata_approval_project=metadata_approval_project,
+                                   codex_home=codex_home, cursor=cursor)
     if inventory["review_id"] != review_id:
         raise SessionError("inventory_changed_rediscover_and_reapprove")
     catalogue = {c["session_ref"]: c for c in inventory["candidates"]}
-    if any(ref not in catalogue or not catalogue[ref]["body_eligible"] for ref in session_refs):
+    if any(ref not in catalogue or not catalogue[ref]["body_eligible"]
+           or (metadata_approval_project is not None and catalogue[ref]["project_match"] != "matched")
+           for ref in session_refs):
         raise SessionError("unapproved_or_ineligible_session")
     home, _ = history_home(codex_home)
     current = Scanner(root).run()
@@ -446,11 +651,13 @@ class Parser(argparse.ArgumentParser):
 def main(argv=None):
     try:
         parser = Parser(description=__doc__)
-        parser.add_argument("action", nargs="?", choices=("discover", "recover"))
+        parser.add_argument("action", nargs="?", choices=("discover", "match", "recover"))
         parser.add_argument("--project", required=True)
         parser.add_argument("--session-opt-in", metavar="PROJECT", help="Explicit discovery consent for this exact project.")
         parser.add_argument("--codex-home", help="Optional explicitly selected Codex home; defaults to CODEX_HOME or ~/.codex.")
         parser.add_argument("--approve-bodies", metavar="REVIEW_ID", help="Separate approval of the displayed inventory snapshot.")
+        parser.add_argument("--approve-metadata", metavar="PROJECT", help="Explicit approval of bounded initial metadata matching for this project.")
+        parser.add_argument("--cursor", help="Opaque next_cursor from discovery or matching; omit for the first page.")
         parser.add_argument("--session", action="append", default=[], help="Selected session_ref from the displayed inventory.")
         args = parser.parse_args(argv)
         if args.action is None:
@@ -458,10 +665,18 @@ def main(argv=None):
         elif args.action == "discover":
             if args.approve_bodies or args.session:
                 raise SessionError("discovery_cannot_approve_bodies")
-            result = discover(args.project, opt_in_project=args.session_opt_in, codex_home=args.codex_home)
+            if args.approve_metadata:
+                raise SessionError("use_match_for_approved_metadata")
+            result = discover(args.project, opt_in_project=args.session_opt_in, codex_home=args.codex_home, cursor=args.cursor)
+        elif args.action == "match":
+            if args.approve_bodies or args.session:
+                raise SessionError("metadata_matching_cannot_approve_bodies")
+            result = match_metadata(args.project, opt_in_project=args.session_opt_in,
+                metadata_approval_project=args.approve_metadata, codex_home=args.codex_home, cursor=args.cursor)
         else:
             result = recover(args.project, opt_in_project=args.session_opt_in, codex_home=args.codex_home,
-                             review_id=args.approve_bodies, session_refs=args.session)
+                             review_id=args.approve_bodies, session_refs=args.session,
+                             metadata_approval_project=args.approve_metadata, cursor=args.cursor)
         print(json.dumps(result, indent=2, ensure_ascii=True))
         return 0
     except SessionError as error:

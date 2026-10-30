@@ -4,6 +4,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import io
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -415,6 +416,283 @@ class SessionCase(unittest.TestCase):
             self.assertEqual((code, result["error"]["code"]), (2, "body_approval_required"))
         code, result = call(["discover", "--project", str(self.root), "--session-opt-in", str(self.root), "--approve-bodies", "not-combined"])
         self.assertEqual(result["error"]["code"], "discovery_cannot_approve_bodies")
+
+
+class SmartDiscoveryCase(unittest.TestCase):
+    # Reuse the synthetic fixture setup without re-running inherited test methods.
+    setUp = SessionCase.setUp
+    header = SessionCase.header
+    msg = SessionCase.msg
+    write = SessionCase.write
+    inventory = SessionCase.inventory
+
+    def match(self, **kwargs):
+        return sessions.match_metadata(self.root, opt_in_project=self.root,
+            metadata_approval_project=self.root, codex_home=self.home, **kwargs)
+
+    def initial_only(self, prefixes, opened=None):
+        case = self
+        class InitialOnly(io.BytesIO):
+            def read(self, size=-1):
+                case.assertEqual(size, 1, "metadata matching attempted read-ahead")
+                if self.tell() >= len(self.getvalue()):
+                    raise AssertionError("conversation bytes were requested")
+                return super().read(size)
+            def readline(self, size=-1):
+                raise AssertionError("line-buffered transcript read requested")
+        def guarded(path, *args, **kwargs):
+            case.assertIn(path, prefixes, "an unselected history file was opened")
+            case.assertEqual(args, ("rb",))
+            case.assertEqual(kwargs, {"buffering": 0})
+            if opened is not None:
+                opened.append(path)
+            return InitialOnly(prefixes[path])
+        return patch.object(Path, "open", guarded)
+
+    def test_metadata_approval_precedes_location_detection_and_reads(self):
+        with patch.object(sessions, "history_home", side_effect=AssertionError("history detected")):
+            with self.assertRaisesRegex(sessions.SessionError, "session_opt_in_required"):
+                sessions.match_metadata(self.root, metadata_approval_project=self.root)
+            with self.assertRaisesRegex(sessions.SessionError, "metadata_approval_required"):
+                sessions.match_metadata(self.root, opt_in_project=self.root)
+            with self.assertRaisesRegex(sessions.SessionError, "project_consent_mismatch"):
+                sessions.match_metadata(self.root, opt_in_project=self.root, metadata_approval_project=self.home)
+
+    def test_metadata_shortlist_has_dates_sizes_confidence_without_bodies(self):
+        header = self.header(project_path=str(self.root))
+        path = self.write([header, self.msg("Goal: BODY_MUST_NOT_BE_READ")])
+        prefix = json.dumps(header).encode()
+        with self.initial_only({path: prefix}), patch.object(sessions, "Scanner", side_effect=AssertionError("project scan invoked")):
+            report = self.match()
+        self.assertEqual(report["match_counts"], {"matched": 1, "unmatched": 0, "unresolved": 0, "unsupported": 0})
+        item = report["matching_sessions"][0]
+        self.assertEqual(item["confidence"], "high")
+        self.assertEqual(item["match_basis"], "cwd_exact")
+        self.assertEqual(item["metadata"], {"cwd": "[PROJECT]", "project_path": "[PROJECT]"})
+        self.assertEqual(item["metadata_evidence"]["line"], 1)
+        self.assertTrue(item["session_started_at"])
+        self.assertGreater(item["size_bytes"], len(prefix))
+        self.assertFalse(report["bodies_read"])
+        self.assertEqual(report["coverage"]["metadata_bytes_read"], len(prefix))
+        self.assertNotIn("BODY_MUST_NOT_BE_READ", json.dumps(report))
+        self.assertNotIn(str(self.base), json.dumps(report))
+
+    def test_mixed_counts_and_descendant_confidence(self):
+        records = [self.header(), self.header(cwd=self.root / "src"),
+                   self.header(cwd=self.root / "src", project_path=str(self.root)),
+                   self.header(cwd=str(self.root) + "-other"), self.header(project_path=str(self.home)),
+                   {"type": "session_meta", "payload": {"cwd": "."}},
+                   {"type": "session_meta", "payload": {"project_path": str(self.root)}},
+                   {"type": "unexpected", "payload": {}}]
+        prefixes = {}
+        for index, header in enumerate(records):
+            path = self.write([header, self.msg("Goal: NEVER_READ")], f"sessions/rollout-mixed-{index}.jsonl")
+            prefixes[path] = json.dumps(header).encode()
+        with self.initial_only(prefixes):
+            report = self.match()
+        self.assertEqual(report["match_counts"], {"matched": 3, "unmatched": 2, "unresolved": 2, "unsupported": 1})
+        self.assertEqual([c["confidence"] for c in report["matching_sessions"]], ["high", "medium", "high"])
+        self.assertNotIn("NEVER_READ", json.dumps(report))
+
+    def test_unsupported_initial_records_stop_before_payload_values(self):
+        prefixes = {}
+        for index, prefix in enumerate((b'{"type":"response_item"', b'{"payload":')):
+            path = self.write([self.msg("Goal: PRIVATE_BODY_SENTINEL")], f"sessions/rollout-unsupported-{index}.jsonl")
+            prefixes[path] = prefix
+        with self.initial_only(prefixes):
+            report = self.match()
+        self.assertEqual(report["match_counts"]["unsupported"], 2)
+        self.assertFalse(report["matching_sessions"])
+
+    def test_timestamp_before_type_and_escaped_metadata_strings(self):
+        header = {"timestamp": OLD_TIME, "type": "session_meta", "payload": {
+            "cwd": str(self.root), "project_path": str(self.root), "instructions": 'quoted "{}" and \\ slashes'}}
+        path = self.write([header, self.msg("Goal: NEVER_READ")])
+        with self.initial_only({path: json.dumps(header).encode()}):
+            report = self.match()
+        self.assertEqual(report["match_counts"]["matched"], 1)
+        self.assertNotIn("instructions", json.dumps(report))
+
+    def test_oversized_transcripts_allow_matching_but_not_body_recovery(self):
+        header = self.header()
+        path = self.write([header])
+        prefix = json.dumps(header).encode()
+        path.write_bytes(prefix + b"\n" + b"x" * (sessions.MAX_FILE_BYTES + 1))
+        with self.initial_only({path: prefix}):
+            report = self.match()
+            self.assertEqual(report["match_counts"]["matched"], 1)
+            item = report["matching_sessions"][0]
+            self.assertFalse(item["body_eligible"])
+            with self.assertRaisesRegex(sessions.SessionError, "ineligible_session"):
+                sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
+                    codex_home=self.home, review_id=report["review_id"], session_refs=[item["session_ref"]])
+        self.assertEqual(report["coverage"]["metadata_bytes_read"], len(prefix))
+
+    def test_header_and_batch_read_limits_are_reported(self):
+        self.write([self.header(), self.msg("Goal: NEVER_READ")])
+        with patch.object(sessions, "MAX_METADATA_BYTES", 20):
+            report = self.match()
+        self.assertEqual(report["match_counts"]["unresolved"], 1)
+        self.assertEqual(report["coverage"]["metadata_bytes_read"], 20)
+        self.assertIn("metadata_file_byte_limit", report["coverage"]["matching_reasons"])
+        with patch.object(sessions, "MAX_METADATA_TOTAL_BYTES", 10):
+            report = self.match()
+        self.assertEqual(report["coverage"]["metadata_bytes_read"], 10)
+        self.assertIn("metadata_batch_byte_limit", report["coverage"]["matching_reasons"])
+
+    def test_malformed_duplicate_and_missing_headers_are_unsupported(self):
+        fixtures = ['{broken', '{"type":"session_meta","type":"session_meta","payload":{}}',
+                    '{"type":"session_meta","payload":[]}', '', '[]']
+        for index, data in enumerate(fixtures):
+            self.write([data], f"sessions/rollout-malformed-{index}.jsonl")
+        report = self.match()
+        self.assertEqual(report["match_counts"]["unsupported"], len(fixtures))
+        self.assertEqual(report["status"], "no_matching_sessions")
+
+    def test_empty_results_are_successful_and_do_not_open_any_file(self):
+        with patch.object(Path, "open", side_effect=AssertionError("empty history opened")):
+            report = self.match()
+        self.assertEqual(report["match_counts"], {name: 0 for name in ("matched", "unmatched", "unresolved", "unsupported")})
+        self.assertIsNone(report["pagination"]["next_cursor"])
+        self.assertFalse(report["coverage"]["complete"])
+
+    def test_pages_beyond_fifty_read_only_their_own_metadata(self):
+        prefixes = {}
+        for index in range(55):
+            header = self.header(cwd=self.root if index == 54 else self.home)
+            path = self.write([header, self.msg("Goal: NEVER_READ")], f"sessions/rollout-{index:03d}.jsonl")
+            prefixes[path] = json.dumps(header).encode()
+        first_opened, second_opened = [], []
+        with self.initial_only(prefixes, first_opened):
+            first = self.match()
+        self.assertEqual(first["match_counts"]["unmatched"], 50)
+        self.assertFalse(first["matching_sessions"])
+        self.assertIsNotNone(first["pagination"]["next_cursor"])
+        with self.initial_only(prefixes, second_opened):
+            second = self.match(cursor=first["pagination"]["next_cursor"])
+        self.assertEqual(second["match_counts"], {"matched": 1, "unmatched": 4, "unresolved": 0, "unsupported": 0})
+        self.assertIsNone(second["pagination"]["next_cursor"])
+        self.assertEqual(len(set(first_opened + second_opened)), 55)
+        self.assertFalse(set(first_opened) & set(second_opened))
+
+    def test_one_exact_match_and_forty_nine_unrelated_headers(self):
+        prefixes = {}
+        for index in range(50):
+            header = self.header(cwd=self.root if index == 0 else self.home)
+            path = self.write([header, self.msg("Goal: BODY_SENTINEL")], f"sessions/rollout-{index:03d}.jsonl")
+            prefixes[path] = json.dumps(header).encode()
+        before = {path: (path.stat().st_size, path.stat().st_mtime_ns) for path in prefixes}
+        with self.initial_only(prefixes):
+            report = self.match()
+        self.assertEqual(report["match_counts"], {"matched": 1, "unmatched": 49, "unresolved": 0, "unsupported": 0})
+        self.assertEqual(report["matching_sessions"][0]["match_basis"], "cwd_exact")
+        self.assertEqual(before, {path: (path.stat().st_size, path.stat().st_mtime_ns) for path in prefixes})
+        self.assertNotIn("BODY_SENTINEL", json.dumps(report))
+
+    def test_header_digest_invalidates_approval_even_with_restored_stat_times(self):
+        path = self.write([self.header(instructions="fictional-one"), self.msg("Goal: fictional context")])
+        report = self.match()
+        before = path.stat()
+        data = path.read_bytes().replace(b"fictional-one", b"fictional-two")
+        path.write_bytes(data)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with self.assertRaisesRegex(sessions.SessionError, "rediscover_and_reapprove"):
+            sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
+                codex_home=self.home, review_id=report["review_id"],
+                session_refs=[report["matching_sessions"][0]["session_ref"]])
+
+    def test_cursor_rejects_membership_changes_invalid_values_and_other_projects(self):
+        for index in range(3):
+            self.write([self.header()], f"sessions/rollout-{index}.jsonl")
+        with patch.object(sessions, "MAX_FILES", 2):
+            first = self.match()
+            cursor = first["pagination"]["next_cursor"]
+            with self.assertRaisesRegex(sessions.SessionError, "invalid_cursor"):
+                self.match(cursor="not-base64")
+            other = self.base / "other-project"
+            other.mkdir()
+            with self.assertRaisesRegex(sessions.SessionError, "restart_pagination"):
+                sessions.match_metadata(other, opt_in_project=other, metadata_approval_project=other,
+                    codex_home=self.home, cursor=cursor)
+            self.write([self.header()], "sessions/rollout-new.jsonl")
+            with self.assertRaisesRegex(sessions.SessionError, "restart_pagination"):
+                self.match(cursor=cursor)
+
+    def test_body_appends_do_not_break_pagination_but_invalidate_body_approval(self):
+        first_path = None
+        for index in range(3):
+            path = self.write([self.header()], f"sessions/rollout-{index}.jsonl")
+            first_path = first_path or path
+        with patch.object(sessions, "MAX_FILES", 2):
+            first = self.match()
+            with first_path.open("a", encoding="utf-8") as out:
+                out.write(json.dumps(self.msg("Goal: live append")) + "\n")
+            next_page = self.match(cursor=first["pagination"]["next_cursor"])
+            self.assertEqual(next_page["pagination"]["offset"], 2)
+            with self.assertRaisesRegex(sessions.SessionError, "rediscover_and_reapprove"):
+                sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
+                    codex_home=self.home, review_id=first["review_id"],
+                    session_refs=[first["matching_sessions"][0]["session_ref"]])
+
+    def test_shortlist_body_approval_is_separate_and_selected(self):
+        path = self.write([self.header(), self.msg("Goal: selected context")])
+        unmatched = self.write([self.header(cwd=self.home), self.msg("Goal: UNRELATED_BODY")], "sessions/rollout-unrelated.jsonl")
+        report = self.match()
+        ref = report["matching_sessions"][0]["session_ref"]
+        with patch.object(sessions, "history_home", side_effect=AssertionError("body gate bypassed")):
+            with self.assertRaisesRegex(sessions.SessionError, "body_approval_required"):
+                sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
+                    session_refs=[ref], codex_home=self.home)
+        result = sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
+            session_refs=[ref], review_id=report["review_id"], codex_home=self.home)
+        self.assertEqual(result["resume_summary"]["matched_sessions"], 1)
+        self.assertNotIn("UNRELATED_BODY", json.dumps(result))
+        self.assertEqual(result["sessions"][0]["path"], path.relative_to(self.home).as_posix())
+        rejected = next(c for c in report["candidates"] if c["path"] == unmatched.relative_to(self.home).as_posix())
+        with self.assertRaisesRegex(sessions.SessionError, "ineligible_session"):
+            sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
+                session_refs=[rejected["session_ref"]], review_id=report["review_id"], codex_home=self.home)
+
+    def test_second_page_shortlist_can_be_recovered_with_its_cursor(self):
+        for index in range(3):
+            self.write([self.header(), self.msg(f"Goal: fictional page {index}")], f"sessions/rollout-{index}.jsonl")
+        with patch.object(sessions, "MAX_FILES", 2):
+            first = self.match()
+            cursor = first["pagination"]["next_cursor"]
+            second = self.match(cursor=cursor)
+            result = sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
+                codex_home=self.home, cursor=cursor, review_id=second["review_id"],
+                session_refs=[second["matching_sessions"][0]["session_ref"]])
+        self.assertEqual(result["context"]["user_goals"][0]["statement"], "Goal: fictional page 2")
+
+    def test_windows_extended_drive_unc_and_unsafe_paths(self):
+        drive = sessions.path_key("R:/fictional/moon-garden")
+        for value in (r"r:\FICTIONAL\moon-garden", r"\\?\R:\fictional\moon-garden", "R:/fictional/x/../moon-garden/"):
+            self.assertEqual(sessions.path_key(value), drive)
+        unc = sessions.path_key(r"\\fictional-host\share\project")
+        self.assertEqual(sessions.path_key("//fictional-host/share/project"), unc)
+        self.assertEqual(sessions.path_key(r"\\?\UNC\FICTIONAL-HOST\share\project"), unc)
+        for value in (r"\\.\pipe\fictional", r"\\?\GLOBALROOT\Device\fictional", "R:relative", "R:/project:stream", "R:/bad\npath", "//host"):
+            self.assertIsNone(sessions.path_key(value))
+        self.assertFalse(sessions.within("R:/fictional/project", None))
+
+    def test_cli_metadata_gate_and_match_to_recover(self):
+        self.write([self.header(), self.msg("Goal: approved CLI context")])
+        command = [sys.executable, "-B", str(REPO / "scripts" / "inspect_sessions.py")]
+        common = ["--project", str(self.root), "--session-opt-in", str(self.root), "--codex-home", str(self.home)]
+        missing = subprocess.run(command + ["match"] + common, capture_output=True, text=True)
+        self.assertEqual(missing.returncode, 2)
+        self.assertEqual(json.loads(missing.stdout)["error"]["code"], "metadata_approval_required")
+        combined = subprocess.run(command + ["match"] + common + ["--approve-metadata", str(self.root),
+            "--approve-bodies", "not-combined"], capture_output=True, text=True)
+        self.assertEqual(json.loads(combined.stdout)["error"]["code"], "metadata_matching_cannot_approve_bodies")
+        matched = subprocess.run(command + ["match"] + common + ["--approve-metadata", str(self.root)],
+                                 capture_output=True, text=True, check=True)
+        shortlist = json.loads(matched.stdout)
+        recovered = subprocess.run(command + ["recover"] + common + ["--approve-metadata", str(self.root),
+            "--approve-bodies", shortlist["review_id"], "--session", shortlist["matching_sessions"][0]["session_ref"]],
+            capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(recovered.stdout)["resume_summary"]["matched_sessions"], 1)
 
 
 if __name__ == "__main__":

@@ -5,14 +5,16 @@ metadata:
   short-description: Recover project context and plan the next steps
 ---
 
-# Repo Rescue v0.2
+# Repo Rescue v0.2.1
 
 Use Python 3.11+ and the bundled `scripts/inspect_project.py`. Git is optional.
 This skill supports **rescue** and **checkpoint**. Session recovery is optional and
 disabled by default. Ordinary rescue/checkpoint must never discover or read history.
 Only for an explicitly requested session-assisted recovery, follow
-[session recovery](references/session_recovery.md). Its discovery opt-in and later
-selected-transcript approval are separate from checkpoint write approval.
+[session recovery](references/session_recovery.md). Request explicit approval for
+bounded initial metadata matching, show the matching shortlist, then request
+separate approval for selected transcript bodies. Neither authorizes checkpoint
+writes. Stat-only discovery remains available without opening transcript files.
 
 ## Boundaries
 

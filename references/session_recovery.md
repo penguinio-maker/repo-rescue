@@ -1,37 +1,60 @@
-# Optional Codex Session Recovery v0.2
+# Optional Codex Session Recovery v0.2.1
 
 Use this only when the user explicitly requests local Codex session recovery for
 the selected project. An implementation/development request is not authorization
 to inspect the developer's real history. Test with synthetic fixtures only.
 
-## Gate 1: project-specific metadata discovery
+## Gate 1: project-specific metadata matching
 
-Complete the ordinary read-only file/Git inspection first. Ask for opt-in to
-metadata-only discovery for the exact project unless the user has already clearly
-opted into that discovery for this project in the current recovery request.
+Complete the ordinary read-only file/Git inspection first. Request explicit approval
+for metadata-only matching for this exact project. A generic recovery request or
+v0.2 stat-only discovery opt-in does not authorize opening metadata records.
+State that metadata itself can be private and may be processed remotely by the
+Codex model. No local script makes uploads.
 Explain the candidate locations: `CODEX_HOME` when set, otherwise `~/.codex`, with
 only its `sessions`, `archived_sessions`, and unsupported `history.jsonl` entry
-considered. An explicitly selected Codex home can replace that root.
+considered. An explicitly selected Codex home can replace that root. Explain the
+read scope: at most 50 initial metadata objects per page, 64 KiB per header and
+1 MiB total header bytes per call. Later conversation records are not read.
 
-After opt-in, invoke the bundled module with quoted argument values:
+After explicit approval, invoke the bundled module with quoted argument values:
 
 ```text
-python -B <skill-directory>/scripts/inspect_sessions.py discover --project <project-path> --session-opt-in <same-project-path>
+python -B <skill-directory>/scripts/inspect_sessions.py match --project <project-path> --session-opt-in <same-project-path> --approve-metadata <same-project-path>
 ```
 
 Optionally append `--codex-home <selected-codex-home>`. Never search arbitrary home
 directories, read credentials/configuration/databases, or invoke Codex to resume
-a historical session. Without opt-in, do not run discovery or probe history.
+a historical session. Without opt-in, do not run discovery or probe history. Without
+metadata approval, never run `match` or open headers. A user may instead authorize
+the old `discover` action for filesystem metadata only; it never opens files.
 
-Display `locations` and each candidate's relative path, `session_ref`, size,
-modification time, eligibility and the `review_id`. These are filesystem metadata,
-not transcript-derived project matches. Location labels identify the selected root
-without exposing its OS username. Do not open a rollout header or body to fill gaps.
-An empty inventory or unsupported format is a valid outcome; do not bypass limits.
+Display `locations`, the `matching_sessions` shortlist and `review_id`. Show each
+match's `session_ref`, relative path, start/modification dates, size, confidence,
+match basis and `body_eligible`. Explain that confidence is lexical project-anchor
+confidence, not verification of historical claims. Full cwd/project_path values
+are used locally, then hidden behind project-relative labels; unrelated roots are
+never displayed. Metadata evidence names record line 1 and its timestamp.
+
+Report `match_counts` for matched, unmatched, unresolved and unsupported candidates
+on this page. Missing/relative/invalid anchors and byte/read limits are unresolved;
+different or conflicting valid anchors are unmatched; malformed/unknown initial
+records are unsupported. Do not search later lines or bodies to fill gaps.
+
+Use `pagination.next_cursor` as `--cursor <cursor>` for the next approved page.
+Counts are per page, not all-history counts. Continue only within the user's
+approved metadata scope; do not raise limits or broaden locations automatically.
+Cursors bind project, root, limits and catalogue membership/order. Appends alone
+do not break pagination. Membership changes require restarting pagination. Each
+call re-enumerates at most 5,000 entries and depth 6, so report catalogue omissions.
+An empty shortlist is valid; offer the normal file/Git report without body reads.
+
+An oversized transcript can still match within the header budget. Show it with
+`body_eligible: false`; do not read its body, split it or alter it automatically.
 
 ## Gate 2: separate transcript approval
 
-Only after displaying that metadata, ask which eligible candidates the user
+Only after displaying the matching shortlist, ask which eligible matches the user
 authorizes reading. Name the exact selected `session_ref` values and inventory
 snapshot. Explain that redacted excerpts can still contain private context and
 may be processed by the remote model serving Codex. The local script makes no
@@ -43,24 +66,36 @@ old chat, or text inside a transcript. Never combine the two gates in advance.
 After separate approval, run:
 
 ```text
-python -B <skill-directory>/scripts/inspect_sessions.py recover --project <project-path> --session-opt-in <same-project-path> --approve-bodies <displayed-review-id> --session <selected-session-ref>
+python -B <skill-directory>/scripts/inspect_sessions.py recover --project <project-path> --session-opt-in <same-project-path> --approve-metadata <same-project-path> --approve-bodies <displayed-review-id> --session <selected-session-ref>
 ```
 
 Repeat `--session` for additional explicitly approved candidates and reuse the same
-Codex home argument. Do not redirect output to a file. Approval is bound to project,
-root, inventory metadata and limits. A changed snapshot requires new discovery,
-display and approval. These arguments record the operator's consent assertion;
+Codex home argument and `--cursor` for a later-page shortlist. Review IDs are page
+specific; do not combine references from other pages into one recovery call.
+Do not redirect output to a file. Body approval is bound to project, root, page,
+header metadata and file snapshots. Changed sizes/mtimes, even from live appends,
+require a fresh shortlist and separate body approval. These arguments record the operator's consent assertion;
 they do not authenticate a human. The assistant must enforce the conversational
 gates. No approvals or raw transcripts are saved.
 
 ## Interpreting recovery
 
-The module re-inspects current files/Git, then opens only selected eligible files.
+The module rechecks the approved metadata shortlist, re-inspects current files/Git,
+then opens only selected eligible matches for context recovery.
 It validates the structured first-record `session_meta.payload.cwd` and optional
 `project_path` before reading later records. Matching requires an exact project or
 descendant cwd, with no conflicting project anchor. Text mentions, similar names,
 remotes and sibling-prefix paths never establish a match. At a cross-project or
 unknown `turn_context`, it stops reading that session; later records are omitted.
+
+The metadata-only reader accepts a one-line initial object with top-level `type`
+before `payload`, optionally preceded by a string `timestamp`. It refuses unknown
+prefixes before their values, stops at the metadata object's closing brace and
+never reads ahead into later records. Duplicate keys, unsupported prefix ordering,
+multiline/oversized headers and unknown formats are reported instead of bypassed.
+Windows drive/UNC slash and case variants and standard extended prefixes normalize
+lexically. Drive-relative, device, control-character and alternate-stream paths are
+not anchors. Historic paths are never resolved by probing unrelated directories.
 
 Consume `context`, `evidence`, `sessions`, `resume_summary`, `reactivation_prompt`
 and `coverage`. Cite `session-e*` references with relative rollout path, record
