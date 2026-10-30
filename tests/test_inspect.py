@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,49 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "inspect_project.py"
 spec = importlib.util.spec_from_file_location("inspect_project", SCRIPT)
 scan = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scan)
+
+
+class RedactionCase(unittest.TestCase):
+    def test_ordinary_urls_are_preserved(self):
+        urls = ["https://example.invalid/docs", "http://example.invalid/page?q=one",
+                "https://example.invalid/a?next=" + "/" + "home/fictional",
+                "https://example.invalid/path/C:/public", "ssh://example.invalid/repository"]
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertEqual(scan.redact(url), url)
+
+    def test_windows_drive_paths_are_redacted(self):
+        for path in (r"R:\Workspace\fictional\main.py", "R:/Workspace/fictional/main.py", "R://Workspace/fictional/main.py"):
+            with self.subTest(path=path):
+                self.assertEqual(scan.redact("Open " + path), "Open [REDACTED_PATH]")
+
+    def test_home_paths_are_redacted(self):
+        paths = ["~/fictional/main.py", r"~\fictional\main.py",
+                 "/" + "home/fictional/main.py", "/" + "Users/fictional/main.py",
+                 "R:" + chr(92) + "Users" + chr(92) + "fictional" + chr(92) + "main.py"]
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(scan.redact(path), "[REDACTED_PATH]")
+
+    def test_quoted_paths_with_spaces_and_file_urls(self):
+        for path in ('"R:/Workspace/fictional project/main.py"', "'~/fictional project/main.py'",
+                     "file:///fictional/project/main.py"):
+            result = scan.redact(path)
+            self.assertIn("[REDACTED_PATH]", result)
+            self.assertNotIn("fictional", result)
+            self.assertNotIn("main.py", result)
+
+    def test_urls_and_paths_in_same_line(self):
+        url = "https://example.invalid/docs"
+        self.assertEqual(scan.redact(f"See {url} and R:/Workspace/fictional/main.py"),
+                         f"See {url} and [REDACTED_PATH]")
+
+    def test_secrets_inside_urls_are_still_protected(self):
+        self.assertNotIn("fictional-value", scan.redact("https://example.invalid/?api_key=fictional-value"))
+        self.assertNotIn("fictional:password", scan.redact("https://fictional:password@example.invalid/docs"))
+        synthetic_token = "ghp_" + "A" * 32
+        self.assertNotIn(synthetic_token, scan.redact("https://example.invalid/" + synthetic_token))
+        self.assertNotIn("developer@example.invalid", scan.redact("developer@example.invalid"))
 
 
 class ProjectCase(unittest.TestCase):
@@ -109,6 +153,134 @@ class ProjectCase(unittest.TestCase):
         report = self.inspect()
         self.assertEqual(report["coverage"]["text_files_read"], 0)
         self.assertNotIn("fictional", json.dumps(report))
+
+    def test_key_header_concatenation_false_positive_is_fixed(self):
+        # This is source syntax, not a key header or user data.
+        expression = 'header = "-----BEGIN " + "PRIVATE KEY-----"'
+        old_pattern = r"-----BEGIN [^-\r\n]*PRIVATE KEY-----"
+        self.assertIsNotNone(re.search(old_pattern, expression))
+        self.write("examples.py", expression + "\n# TODO: fictional example\n")
+        report = self.inspect()
+        self.assertEqual(report["coverage"]["text_files_read"], 1)
+        self.assertEqual(report["coverage"]["exclusions"]["heuristic"], {})
+        self.assertEqual(report["markers"][0]["marker"], "TODO")
+
+    def test_valid_key_header_variants_remain_excluded(self):
+        for kind in ("", "RSA ", "EC ", "OPENSSH ", "ENCRYPTED "):
+            with self.subTest(kind=kind):
+                header = "-----BEGIN " + kind + "PRIVATE KEY-----"
+                self.write("notes.md", header + "\nSYNTHETIC_ONLY\n")
+                report = self.inspect()
+                self.assertEqual(report["coverage"]["text_files_read"], 0)
+                self.assertEqual(report["coverage"]["exclusions"]["heuristic"], {"embedded_private_key": 1})
+                self.assertTrue(report["coverage"]["partial"])
+                self.assertFalse(report["coverage"]["truncation"]["occurred"])
+                self.assertNotIn("SYNTHETIC_ONLY", json.dumps(report))
+
+    def test_readme_commands_have_exact_references_and_never_run(self):
+        command = "python -B -m unittest discover -s tests -v"
+        self.write("README.md", "# Fictional Garden\n\n```sh\n" + command + "\n```\nRun `npm test`.\n")
+        self.write("tests/test_guard.py", "from pathlib import Path\n"
+                   "Path('UNEXPECTED').write_text('fictional')\n"
+                   "raise RuntimeError('discovered tests must never run')\n")
+        report = self.inspect()
+        docs = [c for c in report["test_commands"] if c["origin"] == "documentation"]
+        self.assertEqual([c["argv"] for c in docs],
+                         [["python", "-B", "-m", "unittest", "discover", "-s", "tests", "-v"], ["npm", "test"]])
+        refs = {e["id"]: e for e in report["evidence"]}
+        for cmd, line, column in zip(docs, (4, 6), (1, 6)):
+            ref = refs[cmd["evidence"][0]]
+            self.assertEqual((ref["path"], ref["line"], ref["column"]), ("README.md", line, column))
+            original = (self.root / "README.md").read_text(encoding="utf-8").splitlines()[line - 1]
+            self.assertEqual(original[column - 1:ref["end_column"]], cmd["source_text"])
+            self.assertEqual(cmd["certainty"], "hypothesis")
+            self.assertEqual(cmd["verification"], "unverified")
+            self.assertFalse(cmd["executed"])
+        self.assertEqual(report["test_execution"]["status"], "not_run")
+        self.assertFalse((self.root / "UNEXPECTED").exists())
+        self.assertFalse((self.root / "tests" / "UNEXPECTED").exists())
+
+    def test_readme_commands_retain_all_references_and_configuration(self):
+        self.write("README.md", "`npm run test`\n`npm run test`\n")
+        self.write("package.json", '{"scripts":{"test":"fictional-runner"}}')
+        commands = self.inspect()["test_commands"]
+        docs = next(c for c in commands if c["origin"] == "documentation")
+        configured = next(c for c in commands if c["origin"] == "project_file")
+        self.assertEqual(len(docs["evidence"]), 2)
+        self.assertEqual(configured["certainty"], "confirmed")
+        self.assertEqual(docs["certainty"], "hypothesis")
+
+    def test_readme_command_after_excerpt_limit_is_still_discovered(self):
+        self.write("README.md", "# Fictional Garden\n" * 45 + "`pytest -q`\n")
+        report = self.inspect()
+        self.assertTrue(report["documentation"][0]["truncated"])
+        self.assertEqual(report["coverage"]["truncation"]["scan_limits"], {})
+        self.assertEqual(report["coverage"]["truncation"]["result_limits"], {"documentation_excerpt_limit": 1})
+        self.assertTrue(report["coverage"]["partial"])
+        ref = next(e for e in report["evidence"] if e["id"] == report["test_commands"][0]["evidence"][0])
+        self.assertEqual((ref["line"], ref["column"]), (46, 2))
+
+    def test_repeated_documentation_reference_limit_is_visible(self):
+        self.write("README.md", "`pytest -q`\n" * 3)
+        with patch.object(scan, "MAX_ITEMS", 2):
+            report = self.inspect()
+        self.assertEqual(len(report["test_commands"][0]["evidence"]), 2)
+        self.assertIn("test_command_reference_limit", report["coverage"]["truncation"]["result_limits"])
+
+    def test_readme_shell_chains_sensitive_arguments_and_non_tests_ignored(self):
+        self.write("README.md", "```sh\npytest && touch UNEXPECTED\nnpm install\n"
+                   "pytest --api_key=fictional-value\npytest /" + "home/fictional/tests\n```\n")
+        report = self.inspect()
+        self.assertFalse(report["test_commands"])
+        self.assertFalse((self.root / "UNEXPECTED").exists())
+        self.assertNotIn("fictional-value", json.dumps(report))
+        self.assertEqual(report["coverage"]["exclusions"]["intentional"]["sensitive_documented_command"], 2)
+
+    def test_nested_readme_working_directory_is_explicitly_uncertain(self):
+        self.write("packages/garden/README.md", "Use `pytest -q`.\n")
+        command = self.inspect()["test_commands"][0]
+        self.assertEqual(command["cwd"], "packages/garden")
+        self.assertEqual(command["cwd_certainty"], "hypothesis")
+
+    def test_intentional_heuristic_and_limit_coverage_are_separate(self):
+        self.write(".env", "FICTIONAL_ONLY=skip")
+        self.write("large.py", "x" * (scan.MAX_FILE_BYTES + 1))
+        (self.root / "binary.py").write_bytes(b"\x00fictional")
+        report = self.inspect()
+        coverage = report["coverage"]
+        self.assertEqual(coverage["exclusions"]["intentional"], {"excluded_path": 2 if isinstance(self, GitCase) else 1})
+        self.assertEqual(coverage["exclusions"]["heuristic"], {"binary_file": 1})
+        self.assertEqual(coverage["truncation"]["reasons"], {"large_file": 1})
+        self.assertTrue(coverage["truncation"]["occurred"])
+        self.assertTrue(coverage["partial"])
+        self.assertFalse(coverage["complete_project_scan"])
+
+    def test_no_operational_gaps_does_not_mean_complete_scan(self):
+        self.write("README.md", "Fictional project\n")
+        self.write(".env", "FICTIONAL_ONLY=skip")
+        with patch.object(scan.Scanner, "inspect_git", return_value={"state": "not_git"}):
+            coverage = self.inspect()["coverage"]
+        self.assertFalse(coverage["partial"])
+        self.assertFalse(coverage["complete_project_scan"])
+        self.assertTrue(coverage["exclusions"]["intentional"])
+        self.assertFalse(coverage["truncation"]["occurred"])
+
+    def test_file_and_entry_limits_are_reported_as_truncation(self):
+        self.write("a.py", "pass\n")
+        self.write("b.py", "pass\n")
+        for limit, reason in (("MAX_FILES", "file_limit"), ("MAX_ENTRIES", "entry_limit")):
+            with self.subTest(limit=limit), patch.object(scan, limit, 1):
+                coverage = self.inspect()["coverage"]
+            self.assertTrue(coverage["truncation"]["occurred"])
+            self.assertIn(reason, coverage["truncation"]["reasons"])
+
+    def test_unreadable_files_are_not_mislabeled_as_policy_exclusions(self):
+        self.write("notes.md", "Fictional project\n")
+        with patch.object(Path, "open", side_effect=PermissionError):
+            coverage = self.inspect()["coverage"]
+        self.assertEqual(coverage["read_failures"], {"unreadable_file": 1})
+        self.assertEqual(coverage["exclusions"]["heuristic"], {})
+        self.assertTrue(coverage["partial"])
 
     def test_redacts_common_sensitive_text(self):
         self.write("README.md", "contact developer@example.invalid\n")

@@ -5,7 +5,7 @@ metadata:
   short-description: Recover project context and plan the next steps
 ---
 
-# Repo Rescue v0.1
+# Repo Rescue v0.1.1
 
 Use Python 3.11+ and the bundled `scripts/inspect_project.py`. Git is optional.
 This skill supports **rescue** and **checkpoint**. Session recovery is outside v0.1.
@@ -39,12 +39,18 @@ python -B <skill-directory>/scripts/inspect_project.py --project <explicit-proje
 Consume JSON from stdout. Exit 0 means an inspection completed, possibly with
 warnings; exit 2 means invalid input or a fatal inspection error. Non-Git folders
 are valid. Review `coverage`, `warnings`, and `git.state` before drawing conclusions.
+Check intentional versus heuristic exclusions, read failures, and truncation reasons.
+`complete_project_scan` is always false: this is a scoped inspection. A false
+`partial` flag does not establish full coverage or a clean working tree.
 Git evidence is collected only when the explicit path is the worktree root; for a
 subdirectory, request the repository root if broader Git inspection is desired.
 
 Evidence entries have IDs, source types, relative paths and line numbers or Git
 commands/hashes. Cite those references in the report. A `confirmed` command means
 its configuration was observed, not that it is installed, safe, or passing.
+README commands have `origin: documentation`, `certainty: hypothesis`, and
+`verification: unverified`, with exact line/column evidence. Their working directory
+is inferred from the README location and must be checked before any approved run.
 `test_execution.status` is always `not_run` for this scanner. Never claim tests
 passed unless a separately authorized execution actually ran; report its exact
 command, working directory, exit code, and result separately from scanner evidence.

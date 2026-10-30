@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -15,7 +16,7 @@ import sys
 import threading
 import tomllib
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 MAX_FILE_BYTES = 128 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024
 MAX_FILES = 2000
@@ -49,17 +50,81 @@ SENSITIVE_NAME = re.compile(
     r"(\.(pem|key|p12|pfx|keystore|jks|kdbx|sqlite|db|bak|log)$)|"
     r"(^repo-rescue-(report|checkpoint))|(^repo_rescue_handoff)", re.I
 )
+PRIVATE_KEY_HEADER = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")
+URL = re.compile(r"\b(?!file:)[a-z][a-z0-9+.-]+://[^\s<>\"'`]+", re.I)
+LOCAL_PATH_START = r"(?:[a-z]:[\\/]|/(?:home|users)/|~[\\/])"
+
+
+def redact_paths(text):
+    # Handle quoted paths with spaces before matching unquoted path tokens.
+    text = re.sub(r"([\"'])" + LOCAL_PATH_START + r"[^\r\n]*?\1",
+                  lambda m: m[1] + "[REDACTED_PATH]" + m[1], text, flags=re.I)
+    text = re.sub(r"\bfile://[^\s<>\"'`]+", "[REDACTED_PATH]", text, flags=re.I)
+    return re.sub(r"(?<![\w:/\\])" + LOCAL_PATH_START + r"[^\s\"'<>`]+",
+                  "[REDACTED_PATH]", text, flags=re.I)
 
 
 def redact(text):
     """Best effort output hygiene, not a guarantee that evidence is publishable."""
-    text = re.sub(r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*", "[REDACTED]", text, flags=re.S)
+    header = PRIVATE_KEY_HEADER.search(text)
+    if header:
+        text = text[:header.start()] + "[REDACTED]"
+    # Preserve URL spans while masking local paths in the surrounding prose.
+    # Secret/email masking below still applies inside URLs.
+    parts = []
+    start = 0
+    for match in URL.finditer(text):
+        parts.extend((redact_paths(text[start:match.start()]), match.group()))
+        start = match.end()
+    parts.append(redact_paths(text[start:]))
+    text = "".join(parts)
+    text = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@", r"\1[REDACTED]@", text)
     text = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,}|AKIA[A-Z0-9]{16})\b", "[REDACTED]", text)
     text = re.sub(r"(?i)\b(?:password|secret|token|api[_-]?key|authorization)\s*[:=]\s*[^\r\n]+", "[REDACTED]", text)
     text = re.sub(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b", "[REDACTED_EMAIL]", text)
-    text = re.sub(r"(?i)(?:[a-z]:[\\/]|/(?:home|users)/|~/)[^\s\"'<>]+", "[REDACTED_PATH]", text)
     text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
     return text
+
+
+def documented_test_commands(text):
+    """Yield simple README command snippets and exact locations, never shell code."""
+    for number, line in enumerate(text.splitlines(), 1):
+        snippets = [(m.group(1), m.start(1) + 1) for m in re.finditer(r"`([^`]+)`", line)]
+        stripped = line.strip()
+        if stripped.startswith("$ "):
+            stripped = stripped[2:]
+        if stripped:
+            snippets.append((stripped, line.find(stripped) + 1))
+        seen = set()
+        for command, column in snippets:
+            if (command, column) in seen:
+                continue
+            seen.add((command, column))
+            if len(command) > 500 or re.search(r"[;&|<>`\r\n]", command):
+                continue
+            try:
+                argv = shlex.split(command, comments=True)
+            except ValueError:
+                continue
+            if not argv:
+                continue
+            runner = argv[0]
+            recognized = runner == "pytest"
+            if re.fullmatch(r"python(?:3(?:\.\d+)?)?(?:\.exe)?|py(?:\.exe)?", runner):
+                module = 1
+                while module < len(argv) and argv[module] in {"-B", "-u", "-I", "-3"}:
+                    module += 1
+                recognized = (argv[module:module + 1] == ["-m"]
+                              and argv[module + 1:module + 2] in (["pytest"], ["unittest"]))
+            elif runner in {"npm", "pnpm", "yarn", "bun"}:
+                target = 2 if argv[1:2] == ["run"] else 1
+                recognized = bool(len(argv) > target and re.fullmatch(r"test(?::[\w-]+)?", argv[target]))
+            elif runner == "make":
+                recognized = bool(len(argv) > 1 and re.fullmatch(r"test(?:[-_][\w-]+)?", argv[1]))
+            elif runner in {"cargo", "go"}:
+                recognized = argv[1:2] == ["test"]
+            if recognized:
+                yield argv, command, number, column
 
 
 def safe_path(value):
@@ -81,6 +146,7 @@ class Scanner:
         self.root = root
         self.commits = commits
         self.skipped = Counter()
+        self.result_truncation = Counter()
         self.warnings = []
         self.evidence = []
         self.partial = False
@@ -98,6 +164,38 @@ class Scanner:
         item = {"id": f"e{len(self.evidence) + 1}", "source": source, **details}
         self.evidence.append(item)
         return item["id"]
+
+    def coverage_summary(self, visited, read):
+        intentional = {"excluded_path", "unsupported_type", "link_or_reparse_point",
+                       "link_or_special_file", "nested_repository", "sensitive_documented_command"}
+        heuristic = {"embedded_private_key", "binary_file", "non_utf8_file"}
+        failures = {"unreadable_entry", "unreadable_directory", "unreadable_file"}
+
+        def counts(reasons):
+            return {k: v for k, v in sorted(self.skipped.items()) if k in reasons}
+
+        result_limits = {"documentation_limit", "marker_limit", "test_command_limit",
+                         "test_command_reference_limit", "recent_files_limit", "git_status_limit",
+                         "git_changed_files_limit"}
+        scan_limits = counts({"large_file", "depth_limit"})
+        scan_limits.update({w: 1 for w in self.warnings if w.endswith("_limit") and w not in result_limits})
+        result_limits = {w: 1 for w in self.warnings if w in result_limits}
+        result_limits.update(self.result_truncation)
+        truncation = {**scan_limits, **result_limits}
+        return {"partial": self.partial or bool(self.warnings) or bool(counts(heuristic)) or bool(truncation),
+                "complete_project_scan": False,
+                "entries_visited": visited, "text_files_read": read, "bytes_read": self.bytes_read,
+                "skipped": dict(self.skipped),
+                "exclusions": {"intentional": counts(intentional), "heuristic": counts(heuristic)},
+                "read_failures": counts(failures),
+                "truncation": {"occurred": bool(truncation), "reasons": truncation,
+                               "scan_limits": scan_limits, "result_limits": result_limits},
+                "limits": {"file_bytes": MAX_FILE_BYTES, "total_bytes": MAX_TOTAL_BYTES,
+                           "files": MAX_FILES, "entries": MAX_ENTRIES, "depth": MAX_DEPTH,
+                           "git_output_bytes": MAX_GIT_BYTES, "git_timeout_seconds": GIT_TIMEOUT},
+                "scope": "Scoped inspection of allowlisted UTF-8 text, never a complete project scan. "
+                         "partial=false means no detected operational or heuristic gaps; intentional "
+                         "exclusions and reporting limits must still be reviewed."}
 
     def git(self, *args):
         self.last_git_returncode = None
@@ -364,7 +462,7 @@ class Scanner:
                 data = source.read(min(MAX_FILE_BYTES + 1, MAX_TOTAL_BYTES - self.bytes_read))
             self.bytes_read += len(data)
             if len(data) < info.st_size:
-                self.warn("file_changed_or_byte_limit")
+                self.warn("total_bytes_limit" if self.bytes_read == MAX_TOTAL_BYTES else "file_changed_during_read")
                 self.partial = True
                 return None
             if len(data) > MAX_FILE_BYTES:
@@ -378,7 +476,7 @@ class Scanner:
                 self.skipped["binary_file"] += 1
                 return None
             # Skip the entire file when an embedded private key is detected.
-            if re.search(r"-----BEGIN [^-\r\n]*PRIVATE KEY-----", text):
+            if PRIVATE_KEY_HEADER.search(text):
                 self.skipped["embedded_private_key"] += 1
                 return None
             return text, len(data)
@@ -398,16 +496,30 @@ class Scanner:
         docs, markers, commands, recent = [], [], [], []
         read = 0
 
-        def add_command(argv, path, line, certainty, reason):
-            if len(commands) >= MAX_ITEMS:
+        def add_command(argv, path, line, certainty, reason, *, origin="project_file",
+                        source_text=None, column=None):
+            cwd = str(PurePosixPath(path).parent)
+            existing = next((c for c in commands if c["argv"] == argv and c["cwd"] == cwd
+                             and c["origin"] == origin), None)
+            if existing is None and len(commands) >= MAX_ITEMS:
                 self.warn("test_command_limit")
                 return
-            cwd = str(PurePosixPath(path).parent)
-            if any(c["argv"] == argv and c["cwd"] == cwd for c in commands):
+            if existing is not None and len(existing["evidence"]) >= MAX_ITEMS:
+                self.warn("test_command_reference_limit")
                 return
-            ev = self.evidence_for("file", path=path, line=line, observation=reason)
-            commands.append({"argv": argv, "cwd": cwd, "certainty": certainty,
-                             "reason": reason, "executed": False, "evidence": [ev]})
+            location = {"path": path, "line": line, "observation": reason}
+            if column is not None:
+                location.update(column=column, end_column=column + len(source_text) - 1)
+            ev = self.evidence_for("file", **location)
+            if existing is not None:
+                existing["evidence"].append(ev)
+                return
+            entry = {"argv": argv, "cwd": cwd, "certainty": certainty,
+                     "reason": reason, "origin": origin, "verification": "unverified",
+                     "executed": False, "evidence": [ev]}
+            if source_text is not None:
+                entry.update(source_text=source_text, cwd_certainty="hypothesis")
+            commands.append(entry)
 
         for path, info in candidates:
             if self.bytes_read + info.st_size > MAX_TOTAL_BYTES:
@@ -425,11 +537,23 @@ class Scanner:
             recent.append({"path": rel, "modified_at": datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat(),
                            "certainty": "confirmed", "evidence": [ev]})
             lines = text.splitlines()
+            if re.match(r"^readme(?:[._-]|$)", path.name, re.I):
+                for argv, command, line, column in documented_test_commands(text):
+                    # Do not leak a secret or local path through parsed arguments.
+                    if redact(command) != command or any(redact(arg) != arg for arg in argv):
+                        self.skipped["sensitive_documented_command"] += 1
+                        continue
+                    add_command(argv, rel, line, "hypothesis",
+                                "README documents this command; runner and working directory are unverified.",
+                                origin="documentation", source_text=command, column=column)
             if DOC_NAME.match(path.name) or ("docs" in path.relative_to(self.root).parts and path.suffix in {".md", ".rst", ".txt"}):
                 if len(docs) < 30:
+                    excerpt_truncated = len(lines) > 40 or len("\n".join(lines[:40])) > 4000
+                    if excerpt_truncated:
+                        self.result_truncation["documentation_excerpt_limit"] += 1
                     ev = self.evidence_for("file", path=rel, line=1, end_line=min(len(lines), 40) or 1)
                     docs.append({"path": rel, "excerpt": redact("\n".join(lines[:40]))[:4000],
-                                 "truncated": len(lines) > 40 or len("\n".join(lines[:40])) > 4000,
+                                 "truncated": excerpt_truncated,
                                  "certainty": "confirmed", "evidence": [ev]})
                 else:
                     self.warn("documentation_limit")
@@ -487,6 +611,8 @@ class Scanner:
                             "hypothesis", "Python test filename observed; unittest compatibility unknown")
 
         recent.sort(key=lambda f: (f["modified_at"], f["path"]), reverse=True)
+        if len(recent) > 30:
+            self.warn("recent_files_limit")
         hypotheses = [{"statement": c["reason"], "certainty": "hypothesis", "evidence": c["evidence"]}
                       for c in commands if c["certainty"] == "hypothesis"]
         if markers:
@@ -500,12 +626,7 @@ class Scanner:
                 "markers": markers, "test_commands": commands,
                 "test_execution": {"status": "not_run", "reason": "Inspection never executes project commands."},
                 "hypotheses": hypotheses, "evidence": self.evidence, "warnings": self.warnings,
-                "coverage": {"partial": self.partial or bool(self.warnings), "entries_visited": visited,
-                             "text_files_read": read, "bytes_read": self.bytes_read, "skipped": dict(self.skipped),
-                             "limits": {"file_bytes": MAX_FILE_BYTES, "total_bytes": MAX_TOTAL_BYTES,
-                                        "files": MAX_FILES, "entries": MAX_ENTRIES, "depth": MAX_DEPTH,
-                                        "git_output_bytes": MAX_GIT_BYTES, "git_timeout_seconds": GIT_TIMEOUT},
-                             "scope": "Allowlisted UTF-8 text only; exclusions apply even when Git-tracked."}}
+                "coverage": self.coverage_summary(visited, read)}
 
 
 class JsonParser(argparse.ArgumentParser):

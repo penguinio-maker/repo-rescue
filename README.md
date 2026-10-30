@@ -1,7 +1,7 @@
 # Repo Rescue
 
 **Resume an abandoned coding project with evidence, a recovery plan, and a useful
-handoff.** Repo Rescue v0.1 is a Codex skill backed by a local Python scanner.
+handoff.** Repo Rescue v0.1.1 is a Codex skill backed by a local Python scanner.
 It has no website, service, telemetry, or runtime dependencies beyond Python and
 optional Git.
 
@@ -83,7 +83,7 @@ The JSON contract uses `schema_version: "1.0"` and includes:
 | `test_execution` | Always `status: "not_run"` |
 | `hypotheses` | Explicit inferences that require verification |
 | `evidence` | IDs referenced by findings; relative file/line or Git command/hash sources |
-| `coverage`, `warnings` | Read counts, skip counts, limits, partial results and diagnostic codes |
+| `coverage`, `warnings` | Intentional/heuristic exclusions, read failures, truncation reasons, counts, limits and diagnostic codes |
 
 For example, a fictional finding might be:
 
@@ -109,6 +109,42 @@ they do not establish runner availability or test compatibility. Package scripts
 and Make targets are confirmed declarations only. Dependencies are never installed.
 Each command carries its own working directory for nested packages.
 
+README files also supply **unverified candidates** from simple command lines or
+inline code: Python unittest/pytest invocations, pytest, package-manager test
+scripts, Make test targets, Cargo and Go tests. These carry `origin: documentation`,
+`certainty: hypothesis`, `verification: unverified`, the exact `source_text`, and
+file/line/column evidence (columns are one-based, with an inclusive `end_column`).
+Repeated mentions retain each source reference. A documentation candidate does not
+replace a configured-command finding. Its working directory is inferred from the
+README directory and marked `cwd_certainty: hypothesis`; documentation may describe
+another directory or environment. No candidate is executed.
+
+This is deliberately limited discovery: shell chains, redirects, multiline
+continuations, complex shell syntax and snippets containing redacted sensitive
+values are skipped. The scanner does not interpret README instructions as shell
+programs. Review a candidate before authorizing execution.
+
+Coverage is scoped, never a claim that the entire project was scanned:
+
+- `exclusions.intentional`: policy exclusions such as sensitive paths, dependency
+  directories, unsupported file types, links and nested repositories. Counts do
+  not expose excluded filenames or contents.
+- `exclusions.heuristic`: content-based omissions such as key-header matches,
+  disguised binaries and non-UTF-8 text. These can include false positives.
+- `read_failures`: files or directory entries that could not be read.
+- `truncation`: whether resource or result limits were hit, with reasons including
+  large files, depth, entry/file/byte budgets and capped result lists.
+  `scan_limits` separates those read/query limits from `result_limits`, such as
+  shortened documentation excerpts and capped command references. A README can
+  be fully read for command discovery while its displayed excerpt is shortened.
+- `partial`: operational warnings, heuristic gaps or truncation were detected.
+  **False does not mean complete**; intentional exclusions can still exist.
+  `complete_project_scan` is always false. Inspect Git's own scoped status and
+  excluded-entry count separately before describing the working tree as clean.
+
+The original `skipped` counts remain available for compatibility. Documentation
+excerpts remain bounded even when command discovery examines later README lines.
+
 ## Safety and privacy
 
 - Scanner operations are read-only: bounded UTF-8 file reads and Git metadata
@@ -124,7 +160,10 @@ Each command carries its own working directory for nested packages.
 - Dependency/build trees such as `node_modules`, `vendor`, virtual environments,
   `target`, and `dist` are excluded. Only allowlisted text extensions/names are
   read. NUL-containing, non-UTF-8 and control-character text is discarded; embedded
-  private-key blocks cause the entire file to be omitted. Detecting disguised
+  syntactically valid PEM-style private-key headers cause the entire file to be
+  omitted, even in examples. Header matching allows uppercase alphanumeric label
+  words, so a quoted source concatenation is not mistaken for a key. This remains
+  a conservative heuristic, not key validation. Detecting disguised
   binaries or embedded keys requires reading a bounded candidate file first.
 - Files are limited to 128 KiB each; reads to 8 MiB total, 2,000 candidate files,
   20,000 directory entries and depth 12. Limits and unreadable entries are reported.
@@ -136,7 +175,9 @@ Each command carries its own working directory for nested packages.
   historical file blobs, remote URLs, author names, or author emails.
 - No network requests or automatic uploads. File references are relative to the
   explicit project; root paths are omitted. Common token, email and home-path
-  patterns in excerpts are redacted as a best effort. **Output can still contain
+  patterns in excerpts are redacted as a best effort. Ordinary URL spans are
+  preserved by local-path masking; secret values and URL credentials are still
+  redacted. **Output can still contain
   private code, business context, branch names or commit subjects. Keep it local
   and review before sharing.** Using a Codex model follows that environment's
   data handling; the skill does not make model processing offline.
