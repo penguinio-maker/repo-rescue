@@ -5,7 +5,7 @@ metadata:
   short-description: Recover project context and plan the next steps
 ---
 
-# Repo Rescue v0.2.5
+# Repo Rescue v0.2.6
 
 Use Python 3.11+ and the bundled `scripts/inspect_project.py`. Git is optional.
 This skill supports **rescue** and **checkpoint**. Session recovery is optional and
@@ -30,6 +30,11 @@ session and project, not the discovery page; unrelated sessions and stale discov
 cursors must not invalidate it. Selected-file growth or replacement still requires
 a fresh shortlist and separate approval. Approval tokens contain relative paths
 and private metadata digests; keep them local and never treat them as authentication.
+Consult the [transcript compatibility matrix](references/transcript_compatibility.md)
+when interpreting omissions. Unclassified user text is retained in `user_statements`
+as historical statements, not verified project facts; do not infer absent context
+from an empty goal/decision category. Metadata section names alone are not grounds
+to reject an otherwise valid extensible world-state map.
 
 ## Boundaries
 

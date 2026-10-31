@@ -1,7 +1,7 @@
 # Repo Rescue
 
 **Resume an abandoned coding project with evidence, a recovery plan, and a useful
-handoff.** Repo Rescue v0.2.5 is a Codex skill backed by local Python scanners.
+handoff.** Repo Rescue v0.2.6 is a Codex skill backed by local Python scanners.
 It has no website, service, telemetry, or runtime dependencies beyond Python and
 optional Git.
 
@@ -405,24 +405,41 @@ prefix. Explain these gaps in the resume summary and reactivation prompt; never
 claim full recovery, silently seek to the tail, raise limits, retry automatically,
 or persist raw history. Current Git/file evidence continues to take priority.
 
-### Recognized world-state metadata (v0.2.4)
+### Transcript compatibility audit (v0.2.6)
+
+The audit found two independent defects: the old world-state section allowlist
+confused structural compatibility with knowledge of metadata semantics; extraction
+also silently lost user statements lacking English labels or keywords. The
+[compatibility matrix](references/transcript_compatibility.md) enumerates supported
+and rejected envelopes and remaining gaps.
+
+`scripts/transcript_records.py` owns envelope dispatch and metadata structure
+validation. `RecordReader` owns bounded JSONL decoding; separate project-anchor
+checks own isolation; `message` normalizes supported conversation content, and
+`extract` classifies redacted statements. Semantic classification never decides
+whether a metadata envelope can be safely skipped.
+
+### Extensible world-state metadata
 
 The public Codex [wire envelope](https://github.com/openai/codex/blob/main/codex-rs/history/src/rollout_payload.rs)
 and [WorldStateItem definition](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs)
 describe `type: world_state` with `payload: {full: boolean, state: object}`.
-This adapter recognizes a deliberately smaller subset:
+This adapter validates the envelope separately from opaque section contents:
 
 - The envelope contains only `type`, a valid timezone-aware `timestamp`, `payload`
   and optional unsigned 64-bit `ordinal` (or null).
-- Payload contains exactly `full` and `state`. State section names are limited to
-  `model`, `tools`, `permissions`, `agents_md` and `environments`; each value must
-  be an object or null. Empty states and full/patch snapshots are supported.
+- Payload contains exactly `full` and `state`. Section names are extensible, and
+  section values may be any valid bounded JSON, including arrays, strings, scalars
+  and null. Empty states and full/patch snapshots are supported. Opaque sections
+  are never interpreted as messages, commands or permission to widen project scope.
 - An `environments` update must explicitly carry a nonempty `environments` map,
   with an in-project `cwd` on every entry. Null removals or partial environment
   patches without cwd stop recovery. This adapter does not reconstruct merge patches.
+- The single-environment shape `environment: {cwd: ...}` is also checked; unknown
+  or removed environment anchors stop rather than inheriting an assumed path.
 - All nested `cwd` and `project_path` anchors are checked lexically. A conflicting,
   invalid or removed anchor stops with `cross_project_or_unknown_world_state`.
-- Unknown fields/sections/types and structures beyond 4,096 visited values or
+- Unknown envelope/payload fields and structures beyond 4,096 visited values or
   depth 64 stop with `unsupported_world_state`. Existing JSON/record limits still
   apply first. Other unknown record types still stop with `unsupported_record`.
 
@@ -499,7 +516,11 @@ historical instructions into the prompt itself.
 An explicit user label such as `Goal:` or `Decision:` is a `historical_statement`:
 the historical statement was observed, not its claimed implementation verified.
 Assistant statements remain `ai_suggestion`; keyword-based classification remains
-`uncertain_interpretation`. English labels/keywords are a small deterministic aid,
+`uncertain_interpretation`. Otherwise-unclassified user text is retained in
+`user_statements`, with `classification: literal_user_statement` and
+`certainty: confirmed_statement_only`. This confirms what was written, not whether
+it was true or implemented. Known context-only environment wrappers are omitted.
+English labels/keywords are a small deterministic aid,
 not a semantic understanding of every conversation. Tool results are not interpreted
 as completed fixes. Duplicate mirrored message records are suppressed. The skill
 uses these grouped findings to compose the in-chat recovery report or approved
@@ -546,6 +567,11 @@ python -B -m unittest discover -s tests -v
 ```
 
 Tests use only generated fictional temporary projects under ignored `.test-tmp/`.
+The Tiny Harbor CLI regression places four unlabeled user facts after realistic
+extensible metadata and verifies all four with exact source lines and timestamps:
+a 7-minute cycle, timing-based fishing, a maximum of three boats, and boats
+disappearing after reload. This is synthetic compatibility evidence, not a claim
+that a private recording or a real game was successfully recovered or validated.
 Multi-megabyte fixtures exercise bounded reads, late-file evidence, per-file/global
 budgets, malformed/huge records, unknown scope changes, text/time limits and inert
 prompt-injection examples. No real Codex history is inspected during development.

@@ -1,4 +1,4 @@
-# Optional Codex Session Recovery v0.2.5
+# Optional Codex Session Recovery v0.2.6
 
 Use this only when the user explicitly requests local Codex session recovery for
 the selected project. An implementation/development request is not authorization
@@ -119,13 +119,14 @@ Malformed/oversized records and unknown record types also stop the file, since
 skipping a record could hide a scope boundary. Never drain a huge line or search
 past damaged records. Known tool, reasoning and system records are ignored within
 supported envelopes; their contents do not become recovery claims.
-v0.2.4 explicitly skips recognized `world_state` comparison metadata: a valid
+The parser skips structurally recognized `world_state` comparison metadata: a valid
 timestamp, optional u64/null ordinal and payload containing exactly boolean `full`
-and object `state`. Only object/null sections `model`, `tools`, `permissions`,
-`agents_md` and `environments` are recognized. Environment updates require explicit
+and object `state`. Section names and bounded JSON values are extensible and
+opaque; unknown section names are not unknown record types. Environment updates require explicit
 in-project cwd on every entry; removed/missing anchors are not inferred by replaying
 merge patches. All nested cwd/project_path anchors must remain in scope.
-Unknown shapes/sections stop with `unsupported_world_state`; conflicting or unknown
+The single `environment` section must also carry explicit cwd. Unknown envelope or
+payload shapes stop with `unsupported_world_state` or `unsafe_record_envelope`; conflicting or unknown
 anchors stop with `cross_project_or_unknown_world_state`. Structural validation
 is bounded to 4,096 values/depth 64, within existing record/byte/time budgets.
 Report `recognized_world_state_skipped` without returning its contents as evidence
@@ -154,7 +155,12 @@ and `coverage`. Cite `session-e*` references with relative rollout path, record
 line, timestamp and role. A `historical_statement` confirms only what a user said
 then, not that the asserted behavior happened. `ai_suggestion` is not an accepted
 decision. `uncertain_interpretation` is a keyword-based hypothesis. Extraction is
-bounded and English-oriented; absent findings do not establish absent history.
+bounded. English-oriented category heuristics are optional: uncategorized user
+text is retained as `user_statements` with literal source evidence, including
+non-English text. It is not an inferred decision or proof of implemented behavior.
+Known environment-context-only wrappers are ignored. See the
+[compatibility matrix](transcript_compatibility.md); absent category findings do
+not establish absent history.
 
 Inspect every `sessions[].coverage`: source size, bytes read/unread, records read,
 `reached_eof`, `stop_reason`, `truncated`, `partial`, text counts and omissions.

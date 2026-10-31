@@ -17,8 +17,10 @@ import sys
 import time
 
 if __package__:
+    from .transcript_records import record_kind, world_state_structure
     from .inspect_project import EXCLUDED_DIRS, PRIVATE_KEY_HEADER, SENSITIVE_NAME, Scanner, is_link, redact
 else:
+    from transcript_records import record_kind, world_state_structure
     from inspect_project import EXCLUDED_DIRS, PRIVATE_KEY_HEADER, SENSITIVE_NAME, Scanner, is_link, redact
 
 MAX_FILES = 50
@@ -36,8 +38,7 @@ MAX_EXTRACTED_CHARS = 16 * 1024
 MAX_PROCESS_SECONDS = 30
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_METADATA_TOTAL_BYTES = 8 * 1024 * 1024
-SESSION_ADAPTER = "0.2.5"
-WORLD_STATE_SECTIONS = {"model", "tools", "permissions", "agents_md", "environments"}
+SESSION_ADAPTER = "0.2.6"
 FILE_NAME = re.compile(r"(?:rollout|session)-[A-Za-z0-9_.-]+\.jsonl$")
 LABELS = {
     "goal": "user_goals", "decision": "decisions", "tried": "attempted_fixes",
@@ -50,6 +51,7 @@ KEYWORDS = {
     "unresolved_problems": r"\b(unresolved|blocked|fails?|broken|error|still)\b",
     "next_actions": r"\b(next|todo|remaining)\b",
 }
+CATEGORIES = (*LABELS.values(), "user_statements")
 
 
 class SessionError(ValueError):
@@ -707,12 +709,11 @@ class RecordReader:
 def world_state_stop_reason(record, project):
     """Recognize comparison metadata, never conversation text or instructions.
 
-    Deliberately narrower than Codex's extensible state map. Environment updates
+    Structural validation accepts Codex's extensible state map. Environment updates
     must carry explicit in-project cwd evidence; do not reconstruct merge patches
     or infer scope from a previously skipped snapshot.
     """
-    if (set(record) - {"type", "timestamp", "ordinal", "payload"}
-            or timestamp(record.get("timestamp")) is None):
+    if not world_state_structure(record) or timestamp(record.get("timestamp")) is None:
         return "unsupported_world_state"
     ordinal = record.get("ordinal")
     if ordinal is not None and (type(ordinal) is not int or not 0 <= ordinal < 2 ** 64):
@@ -722,9 +723,6 @@ def world_state_stop_reason(record, project):
             or type(payload["full"]) is not bool or not isinstance(payload["state"], dict)):
         return "unsupported_world_state"
     state = payload["state"]
-    if (set(state) - WORLD_STATE_SECTIONS
-            or any(value is not None and not isinstance(value, dict) for value in state.values())):
-        return "unsupported_world_state"
     stack, visited = [(state, 0)], 0
     while stack:
         value, depth = stack.pop()
@@ -747,7 +745,17 @@ def world_state_stop_reason(record, project):
                 or any(not isinstance(item, dict) or not within(item.get("cwd"), project)
                        for item in environments.values())):
             return "cross_project_or_unknown_world_state"
+    if "environment" in state:
+        legacy = state["environment"]
+        if not isinstance(legacy, dict) or not within(legacy.get("cwd"), project):
+            return "cross_project_or_unknown_world_state"
     return None
+
+
+def context_only(text):
+    value = text.strip()
+    return any(value.startswith('<' + tag + '>') and value.endswith('</' + tag + '>')
+               for tag in ('environment_context', 'turn_aborted', 'permissions_instructions'))
 
 
 def message(record):
@@ -762,10 +770,13 @@ def message(record):
         texts = [item["text"] for item in content if isinstance(item, dict)
                  and isinstance(item.get("type"), str) and item["type"] in {"input_text", "output_text"}
                  and isinstance(item.get("text"), str)]
-        return role, "\n".join(texts)
+        text = "\n".join(texts)
+        return None if role == "user" and context_only(text) else (role, text)
     if (record.get("type") == "event_msg" and isinstance(payload.get("type"), str)
             and payload["type"] in {"user_message", "agent_message"}):
         if isinstance(payload.get("message"), str):
+            if payload["type"] == "user_message" and context_only(payload["message"]):
+                return None
             return ("user" if payload["type"] == "user_message" else "assistant"), payload["message"]
     return None
 
@@ -783,13 +794,16 @@ def extract(text, role):
             categories = [LABELS[explicit[1].lower()]]
         else:
             categories = [key for key, regex in KEYWORDS.items() if re.search(regex, line, re.I)]
+        literal = role == "user" and not categories
+        if literal:
+            categories = ["user_statements"]
         for category in categories:
             yield {"category": category, "statement": line[:MAX_SNIPPET],
                    "statement_truncated": len(line) > MAX_SNIPPET,
                    "kind": "ai_suggestion" if role == "assistant" else
-                           ("historical_statement" if explicit else "uncertain_interpretation"),
-                   "certainty": "confirmed_statement_only" if role == "user" and explicit else "hypothesis",
-                   "classification": "explicit_label" if explicit else "keyword_heuristic",
+                           ("historical_statement" if explicit or literal else "uncertain_interpretation"),
+                   "certainty": "confirmed_statement_only" if role == "user" and (explicit or literal) else "hypothesis",
+                   "classification": "literal_user_statement" if literal else ("explicit_label" if explicit else "keyword_heuristic"),
                    "current_status": "unverified"}
 
 
@@ -902,16 +916,20 @@ def recover(project, *, opt_in_project=None, review_id=None, session_refs=(), co
                         break
                     if record is None:
                         break
-                    if record.get("type") == "session_meta":
+                    kind, structural_error = record_kind(record)
+                    if structural_error:
+                        reader.stop(structural_error)
+                        break
+                    if kind == "boundary":
                         reader.stop("unexpected_session_boundary")
                         break
-                    if record.get("type") == "turn_context":
+                    if kind == "scope":
                         if not match_project(record.get("payload"), project_key):
                             reader.stop("cross_project_or_unknown_turn")
                             state["status"] = "matched_prefix_only"
                             break  # Never read bodies after crossing to another project.
                         continue
-                    if record.get("type") == "world_state":
+                    if kind == "metadata":
                         reason = world_state_stop_reason(record, project_key)
                         if reason:
                             reader.stop(reason)
@@ -1002,7 +1020,7 @@ def recover(project, *, opt_in_project=None, review_id=None, session_refs=(), co
                 "extracted_chars": sum(len(f["statement"]) for f in findings
                                        if f["evidence"][0] in session_evidence)}
     groups = {category: sorted((f for f in findings if f["category"] == category),
-                              key=lambda f: f["timestamp"] or "") for category in LABELS.values()}
+                              key=lambda f: f["timestamp"] or "") for category in CATEGORIES}
     current_head = current.get("git", {}).get("head")
     prompt_head = current_head if isinstance(current_head, str) and re.fullmatch(r"[0-9a-f]{40,64}", current_head) else "unavailable"
     focus = [f["evidence"][0] for group in groups.values() for f in group[-3:]]
