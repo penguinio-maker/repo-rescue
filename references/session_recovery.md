@@ -1,4 +1,11 @@
-# Optional Codex Session Recovery v0.2.6
+# Optional Codex Session Recovery — backend procedure
+
+Normal user experience is defined in [SKILL.md](../SKILL.md). Keep backend IDs,
+cursor values and diagnostic tables internal unless verbose detail is requested.
+Display numbered choices with dates, sizes, confidence and material gaps. Retain
+the original session/approval mapping in memory; the user approves named choices,
+not hashes. Translate errors into plain language without hiding incomplete reads.
+The separate explicit metadata and body gates below remain mandatory.
 
 Use this only when the user explicitly requests local Codex session recovery for
 the selected project. An implementation/development request is not authorization
@@ -31,15 +38,17 @@ a historical session. Without opt-in, do not run discovery or probe history. Wit
 metadata approval, never run `match` or open headers. A user may instead authorize
 the old `discover` action for filesystem metadata only; it never opens files.
 
-Display `locations`, the `matching_sessions` shortlist and each `approval_id`. Show each
-match's `session_ref`, relative path, start/modification dates, size, confidence,
-match basis and `body_eligible`. Explain that confidence is lexical project-anchor
+Keep `locations`, `matching_sessions` and each `approval_id` internally. Normally
+show at most three numbered matches with start/modification dates, size, confidence
+and material body-eligibility warnings. In verbose mode show relative references,
+match basis and technical coverage. Explain that confidence is lexical project-anchor
 confidence, not verification of historical claims. Full cwd/project_path values
 are used locally, then hidden behind project-relative labels; unrelated roots are
 never displayed. Metadata evidence names record line 1 and its timestamp.
 
-Report `match_counts` for matched, unmatched, unresolved and unsupported candidates
-on this page. Missing/relative/invalid anchors and byte/read limits are unresolved;
+Summarize useful search coverage in one sentence; show `match_counts` and reason
+breakdowns only in verbose output. Counts apply to this page, not all history.
+Missing/relative/invalid anchors and byte/read limits are unresolved;
 different or conflicting valid anchors are unmatched; malformed/unknown initial
 records are unsupported. Explain the specific `match_reason` and aggregated
 `coverage.matching_reasons`: oversized headers, exhausted page budgets, truncated
@@ -56,19 +65,23 @@ An empty shortlist is valid; offer the normal file/Git report without body reads
 
 Large transcripts can match within the header budget and remain `body_eligible`.
 This means eligible for separately approved bounded streaming, not permission to
-read or a promise to read the whole file. Show `recovery_mode`,
-`body_read_budget_bytes` and `body_may_be_truncated` with the shortlist. Other
+read or a promise to read the whole file. Explain any likely incomplete read with
+the shortlist. Keep `recovery_mode` and byte-budget fields for verbose output. Other
 record/text/time limits can truncate even files smaller than their byte budget.
 
 ## Gate 2: separate transcript approval
 
 Only after displaying the matching shortlist, ask which eligible matches the user
-authorizes reading. Obtain explicit approval for each named `session_ref` and inventory
-snapshot. Explain that redacted excerpts can still contain private context and
+authorizes reading. Obtain explicit approval for each numbered/date/size choice.
+Internally bind each approval to its exact `session_ref` and selected-file snapshot.
+Explain that redacted excerpts can still contain private context and
 may be processed by the remote model serving Codex. The local script makes no
 network calls, but local file reading does not make the assistant offline.
 Declining this gate leaves the file/Git report fully usable.
-Explain the v0.2.3 body limits before approval: 8 MiB per selected file and 16 MiB
+For normal consent, disclose 8 MiB per selected file, 16 MiB total, at most 5,000
+records per file and a cooperative 30-second deadline, limited excerpts and
+possible incomplete context. Offer remaining technical bounds on request/verbose.
+The enforced backend limits remain: 8 MiB per selected file and 16 MiB
 total per call, including headers; a 1 MiB header, 128 KiB later records, 5,000
 body records per file; 16 Ki characters per eligible message, 256 Ki eligible
 message characters considered per call, 16 Ki characters of extracted statements,

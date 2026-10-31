@@ -16,7 +16,7 @@ import sys
 import threading
 import tomllib
 
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 MAX_FILE_BYTES = 128 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024
 MAX_FILES = 2000
