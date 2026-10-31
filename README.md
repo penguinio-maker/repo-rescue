@@ -1,7 +1,7 @@
 # Repo Rescue
 
 **Resume an abandoned coding project with evidence, a recovery plan, and a useful
-handoff.** Repo Rescue v0.2.2 is a Codex skill backed by local Python scanners.
+handoff.** Repo Rescue v0.2.3 is a Codex skill backed by local Python scanners.
 It has no website, service, telemetry, or runtime dependencies beyond Python and
 optional Git.
 
@@ -232,7 +232,7 @@ The ordinary `scripts/inspect_project.py` does not invoke or import it.
    size, confidence, body eligibility and `review_id`. No conversation records are
    read. Unrelated cwd/project_path values are not displayed.
 2. **Transcript approval:** after reviewing the shortlist, separately authorize
-   selected eligible matches. `recover` requires the displayed review ID, the same
+   each selected eligible match. `recover` requires the displayed review ID, the same
    project and metadata approval flags, and explicit `--session` values. Body
    approval is bound to a fresh page snapshot; changed headers, sizes or mtimes
    require a new shortlist and approval. Matching cannot be combined with body
@@ -315,9 +315,64 @@ claim. Body review IDs still bind the page's size/mtime/header snapshots, so act
 transcripts changing between shortlist and recovery require fresh body approval.
 Continue pages only within the user's approved metadata scope.
 
-**Oversized transcripts remain eligible for metadata matching.** Their bounded
-initial header can yield a match even when the file exceeds the 2 MiB body limit.
-Such matches show `body_eligible: false`; no body is read or automatically split.
+**Large transcripts support separately approved bounded streaming recovery.**
+File size no longer disqualifies a regular candidate. `body_eligible: true` means
+eligible for the bounded reader, not approved or guaranteed complete. Shortlists
+show `recovery_mode: bounded_stream`, `body_read_budget_bytes` and
+`body_may_be_truncated`. The metadata approval still reads only initial headers.
+Each transcript body needs explicit selection and approval after the shortlist.
+Review IDs and cursors bind the new limits, so upgrades require a fresh shortlist
+and body approval. Earlier small-file approvals do not authorize larger reads.
+
+### Bounded large-session recovery
+
+The reader processes one JSONL record at a time from the beginning, without
+collecting the transcript or reading ahead past record boundaries. It can recover
+a multi-megabyte file while holding only bounded record/metadata objects and
+bounded extracted findings. No raw transcript, continuation file, cache or log is
+written. No discovered instruction or command is executed.
+
+Body limits must be explained before approval:
+
+| Limit | Default per recovery call unless specified |
+| --- | --- |
+| Bytes read per selected file | 8 MiB, including the initial header |
+| Total bytes read across selected files | 16 MiB, including selected headers |
+| Record size | 1 MiB for the header; 128 KiB for later records |
+| Body records | 5,000 per selected file |
+| Eligible message text | 16 Ki characters per message; larger messages omitted whole |
+| Eligible text considered | 256 Ki characters total |
+| Extracted text | 16 Ki characters total, 100 findings maximum |
+| Finding excerpts | First 20 message lines; 240 characters per statement |
+| Processing time | Cooperative 30-second body-processing deadline |
+
+The timer starts after metadata revalidation and the current file/Git scan. Checks
+occur before/after record reads and during processing. Blocking filesystem reads
+cannot be interrupted by this timer; it is not a hard whole-command timeout.
+If any global budget is exhausted, remaining selected files are reported as
+`not_read_budget_exhausted`; limits do not reset per file. The per-file byte budget
+limits reads, not eligibility. Files larger than the budget can yield a prefix.
+
+Malformed JSON, duplicate keys, invalid UTF-8, oversized records, unknown record
+types and project boundaries stop that file. The reader never skips a damaged or
+huge record, since it could hide a `turn_context` or new session. Known tool outputs,
+reasoning and system messages within supported envelopes are ignored as evidence.
+An oversized known message is omitted whole, with its omission reported. Redaction
+precedes excerpt truncation; sensitive values are not sliced before masking.
+
+Each `sessions[].coverage` reports `source_size_bytes`, `bytes_read`, `unread_bytes`,
+`records_read`, `reached_eof`, `stop_reason`, `truncated`, `partial`, text counts and
+omissions. `eof` means the selected snapshot's byte range was consumed; it does not
+mean every record produced context. A prefix has an explicit byte/record/time/text
+stop reason. Changed files lose all recovered findings. Global coverage summarizes
+partial/truncated sessions and keeps `complete: false`. Text/snippet exclusions can
+make `partial: true` even at EOF. Extraction-budget counts include discarded work;
+`extracted_chars` counts returned statements only.
+
+Recovery is chronological and can miss recent goals or reversals beyond the
+prefix. Explain these gaps in the resume summary and reactivation prompt; never
+claim full recovery, silently seek to the tail, raise limits, retry automatically,
+or persist raw history. Current Git/file evidence continues to take priority.
 
 ### Locations and format boundary
 
@@ -393,12 +448,10 @@ state. Missing/invalid times stay unknown. Historical "tests passed" claims neve
 change `test_execution.status: not_run`. The reactivation prompt treats history as
 untrusted evidence and requires fresh inspection and appropriate action approvals.
 
-Limits are 50 candidate files per page, 5,000 catalogue entries per call, depth 6,
-1 MiB per initial metadata record, 8 MiB metadata bytes per page, and 2 MiB
-per eligible body-recovery file, 8 MiB total body-recovery reads, 1 MiB for its
-initial header and 128 KiB per later JSONL record, 5,000 body
-records per selected file, 100 findings, 20 lines considered per message and 240
-characters per redacted statement. Bounded cataloguing can omit recent sessions;
+Discovery limits are 50 candidate files per page, 5,000 catalogue entries per call,
+depth 6, 1 MiB per initial metadata record and 8 MiB metadata bytes per page.
+Body recovery uses the separate byte, record, text and time bounds above.
+Bounded cataloguing can omit recent sessions;
 no full-history or complete-context claim is made. Unknown and malformed records,
 scope boundaries, read failures, changed files and limits are reported. Files that
 change during recovery have their findings discarded. Smart shortlist revalidation
@@ -430,6 +483,9 @@ python -B -m unittest discover -s tests -v
 ```
 
 Tests use only generated fictional temporary projects under ignored `.test-tmp/`.
+Multi-megabyte fixtures exercise bounded reads, late-file evidence, per-file/global
+budgets, malformed/huge records, unknown scope changes, text/time limits and inert
+prompt-injection examples. No real Codex history is inspected during development.
 They exercise both session approval gates, default history isolation, matching,
 metadata-only byte boundaries, oversized transcripts, Windows paths, pagination,
 malformed/unsupported history, redaction, stale claims, bounded reads and CLI
