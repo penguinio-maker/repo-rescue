@@ -37,7 +37,7 @@ Always provide the project path explicitly. These examples use a fictional proje
 
 ```text
 Use $repo-rescue to rescue the project at ./examples/moon-garden.
-Explain what is confirmed, what is uncertain, and the next 3-7 actions.
+Give the concise report and three practical next steps.
 ```
 
 ```text
@@ -49,9 +49,10 @@ document, and ask before writing it.
 The example project is illustrative and is not bundled. Relative project paths
 resolve from the command's current directory. Quote paths containing spaces.
 
-**rescue** inspects and returns an in-chat report: apparent purpose, branch/HEAD,
-recent activity, working changes, documentation, markers, test candidates, gaps,
-and 3-7 ordered actions. Every concrete claim should cite scanner evidence.
+**rescue** returns five short sections: project name/description, where you left off,
+previous decisions, meaningful unresolved problems and exactly three practical next
+steps. Aim for under 200 words. Keep evidence and diagnostics in memory and expose
+them through details, not the normal report. Raw scanner JSON retains its full schema.
 
 **checkpoint** prepares a Markdown handoff with current state, known problems and
 unknowns, evidence-backed decisions, validation status, next steps, and a

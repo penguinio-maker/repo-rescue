@@ -1,5 +1,6 @@
 """Public beta workflow tests using fictional projects/history only."""
 import json
+import copy
 import os
 from pathlib import Path
 import subprocess
@@ -45,9 +46,9 @@ class PresentationCase(unittest.TestCase):
         with patch.object(inspect_sessions, 'history_home', side_effect=AssertionError('history detected')):
             project = inspect_project.Scanner(self.project).run()
             initial = present(project)
-        self.assertEqual(initial['where_i_left_off'], [])
-        self.assertEqual(initial['tests'], 'not_run')
-        self.assertEqual(len(initial['next_actions']), 3)
+        self.assertIn('unclear', initial['where_you_left_off'][0])
+        self.assertNotIn('tests', initial)
+        self.assertEqual(len(initial['next_steps']), 3)
         with self.assertRaisesRegex(inspect_sessions.SessionError, 'metadata_approval_required'):
             inspect_sessions.match_metadata(self.project, opt_in_project=self.project)
         raw = self.match()
@@ -62,12 +63,12 @@ class PresentationCase(unittest.TestCase):
             metadata_approval_project=self.project, codex_home=self.home,
             review_id=selected['approval_id'], session_refs=[selected['session_ref']])
         view = present(recovered)
-        self.assertIn('verify saved boats', json.dumps(view['where_i_left_off']))
-        self.assertIn('maximum 3 boats', json.dumps(view['past_decisions']))
-        self.assertIn('boats disappear', json.dumps(view['unresolved_problems']))
-        self.assertEqual(len(view['next_actions']), 3)
-        self.assertEqual(view['tests'], 'not_run')
-        self.assertTrue(view['evidence']['historical'])
+        self.assertIn('timing-based fishing', json.dumps(view['where_you_left_off']))
+        self.assertIn('maximum 3 boats', json.dumps(view['previous_decisions']))
+        self.assertIn('boats disappear', json.dumps(view['unresolved']))
+        self.assertEqual(len(view['next_steps']), 3)
+        self.assertNotIn('tests', view)
+        self.assertEqual(present(recovered, verbose=True)['diagnostics'], recovered)
         for hidden in ('approval_id', 'review_id', 'snapshot', 'next_cursor', 'session_ref'):
             self.assertNotIn(hidden, json.dumps(view))
 
@@ -93,11 +94,11 @@ class PresentationCase(unittest.TestCase):
             self.assertEqual(present(raw)['sessions'], [])
             self.assertIn('No matching', present(raw)['message'])
             view = present(inspect_project.Scanner(self.project).run())
-            self.assertEqual(len(view['next_actions']), 3)
+            self.assertEqual(len(view['next_steps']), 3)
         view = present({'current_project': {}, 'context': {}, 'coverage': {'partial': True},
                         'sessions': [{'coverage': {'reached_eof': False, 'stop_reason': 'record_byte_limit'}}]})
-        self.assertTrue(view['incomplete'])
-        self.assertEqual(view['tests'], 'not_run')
+        self.assertEqual(view['warning'], 'Some historical context may be missing.')
+        self.assertNotIn('tests', view)
         self.assertNotIn('record_byte_limit', json.dumps(view))
 
     def test_cli_verbose_is_presentation_only_and_invalid_input_is_sanitized(self):
@@ -107,6 +108,8 @@ class PresentationCase(unittest.TestCase):
         self.assertNotIn('diagnostics', json.loads(plain.stdout))
         detail = subprocess.run(command + ['--verbose'], input=json.dumps(raw), text=True, capture_output=True, check=True)
         self.assertEqual(json.loads(detail.stdout)['diagnostics'], raw)
+        alias = subprocess.run(command + ['--details'], input=json.dumps(raw), text=True, capture_output=True, check=True)
+        self.assertEqual(json.loads(alias.stdout), json.loads(detail.stdout))
         bad = subprocess.run(command, input='PRIVATE_SENTINEL', text=True, capture_output=True)
         self.assertEqual(bad.returncode, 2)
         self.assertNotIn('PRIVATE_SENTINEL', bad.stdout + bad.stderr)
@@ -130,13 +133,80 @@ class PresentationCase(unittest.TestCase):
                           'line': 2, 'role': 'assistant', 'timestamp': '2020-01-01T12:00:00Z'},
                          {'id': 'unused', 'private_diagnostic': 'PRIVATE_SENTINEL'}]}
         view = present(raw)
-        item = view['past_decisions'][0]
-        self.assertEqual(item['kind'], 'ai_suggestion')
-        self.assertEqual(item['current_status'], 'unverified')
-        self.assertEqual(view['evidence']['historical'][0]['line'], 2)
-        self.assertEqual(view['evidence']['historical'][0]['role'], 'assistant')
+        self.assertEqual(view['previous_decisions'], [])
+        details = present(raw, verbose=True)['diagnostics']
+        self.assertEqual(details['context']['decisions'][0]['kind'], 'ai_suggestion')
+        self.assertEqual(details['context']['decisions'][0]['current_status'], 'unverified')
+        self.assertEqual(details['evidence'][0]['line'], 2)
+        self.assertEqual(details['evidence'][0]['role'], 'assistant')
         self.assertNotIn('PRIVATE_SENTINEL', json.dumps(view))
-        self.assertIn('No complete-project guarantee', view['coverage_note'])
+
+    def test_default_report_has_only_five_sections_and_no_internal_metadata(self):
+        raw = self.match()
+        selected = raw['matching_sessions'][0]
+        report = inspect_sessions.recover(self.project, opt_in_project=self.project,
+            metadata_approval_project=self.project, codex_home=self.home,
+            review_id=selected['approval_id'], session_refs=[selected['session_ref']])
+        original = copy.deepcopy(report)
+        view = present(report)
+        self.assertEqual(set(view), {'project', 'where_you_left_off', 'previous_decisions', 'unresolved', 'next_steps'})
+        self.assertEqual(view['project'], {'name': 'Fictional harbor', 'description': 'A small fishing game.'})
+        self.assertLess(len(json.dumps(view).split()), 200)
+        for hidden in ('.jsonl', 'session_ref', 'records_read', 'bytes_read', 'EOF', 'parser',
+                       'diagnostics', 'evidence', 'current_status', 'test_execution', 'hash'):
+            self.assertNotIn(hidden, json.dumps(view))
+        self.assertEqual(report, original)
+        self.assertEqual(present(report, verbose=True)['diagnostics'], original)
+
+    def test_duplicate_facts_and_ai_proposals_do_not_become_repeated_decisions(self):
+        def fact(text, kind='historical_statement'):
+            return {'statement': text, 'kind': kind}
+        report = {'documentation': [], 'context': {
+            'user_goals': [fact('Goal: maximum three boats'), fact('Goal: timing-based fishing')],
+            'decisions': [fact('Decision: maximum three boats'), fact('Decision: Maximum three boats!'),
+                          fact('Decision: four boats', 'ai_suggestion')],
+            'next_actions': [fact('Next: check saved boats'), fact('Next: Check saved boats!')]}}
+        view = present(report)
+        text = json.dumps(view).lower()
+        self.assertEqual(text.count('maximum three boats'), 1)
+        self.assertEqual(text.count('check saved boats'), 1)
+        self.assertNotIn('four boats', text)
+        self.assertEqual(len(view['next_steps']), 3)
+
+    def test_up_to_five_decisions_and_short_warning_with_full_details(self):
+        report = {'current_project': {}, 'sessions': [{'coverage': {'partial': True, 'reached_eof': True}}],
+                  'context': {'decisions': [{'statement': 'Decision: ' + choice, 'kind': 'historical_statement'}
+                      for choice in ['manual saving', 'small maps', 'three boats', 'short days', 'timed fishing', 'single player']]},
+                  'coverage': {'partial': True, 'stop_reason': 'input_text_limit'}}
+        view = present(report)
+        self.assertEqual(len(view['previous_decisions']), 5)
+        self.assertEqual(view['warning'], 'Some historical context may be missing.')
+        self.assertNotIn('input_text_limit', json.dumps(view))
+        self.assertLess(len(json.dumps(view).split()), 200)
+        self.assertEqual(present(report, verbose=True)['diagnostics'], report)
+
+    def test_technical_text_is_kept_in_details_without_inventing_progress(self):
+        report = {'context': {'user_goals': [
+            {'statement': 'Goal: read sessions/fictional.jsonl', 'kind': 'historical_statement'},
+            {'statement': 'Goal: inspect abc12345def67890', 'kind': 'historical_statement'},
+            {'statement': 'Goal: EOF records_read: 9', 'kind': 'historical_statement'}]}}
+        view = present(report)
+        self.assertIn('unclear', view['where_you_left_off'][0])
+        self.assertEqual(view['previous_decisions'], [])
+        self.assertEqual(view['unresolved'], [])
+        self.assertNotIn('.jsonl', json.dumps(view))
+        self.assertNotIn('abc12345', json.dumps(view))
+        self.assertEqual(present(report, verbose=True)['diagnostics'], report)
+
+    def test_current_changes_do_not_imply_unfinished_work_or_accept_ai_goals(self):
+        report = {'git': {'working_tree': [{'path': 'game.py'}]},
+                  'context': {'user_goals': [{'statement': 'Goal: add submarines', 'kind': 'ai_suggestion'}]}}
+        view = present(report)
+        self.assertEqual(view['where_you_left_off'], ['There are local changes to review.'])
+        self.assertEqual(view['previous_decisions'], [])
+        self.assertNotIn('earlier goal', json.dumps(view))
+        self.assertNotIn('submarines', json.dumps(view))
+        self.assertEqual(len(view['next_steps']), 3)
 
 
 if __name__ == '__main__':

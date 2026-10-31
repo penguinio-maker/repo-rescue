@@ -2,9 +2,111 @@
 """Compact presentation of already-collected JSON; no project/history access."""
 import argparse
 import json
+import re
 import sys
 
 MAX_INPUT_BYTES = 8 * 1024 * 1024
+
+
+def _text(value):
+    """Select display text conservatively; raw findings remain in diagnostics."""
+    text = re.sub(r'^(?:Goal|Decision|Tried|Problem|Next):\s*', '', str(value or '').strip(), flags=re.I)
+    if re.search(r'\.jsonl\b|\b[0-9a-f]{7,64}\b|\b(?:EOF|session_ref|approval_id|review_id|records_read|bytes_read|parser_version)\b', text, re.I):
+        return ''
+    text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)
+    return ' '.join(text.replace('`', '').split()).rstrip('.!?')
+
+
+def _identity(project):
+    docs = sorted(project.get('documentation', []),
+                  key=lambda item: not item.get('path', '').lower().split('/')[-1].startswith('readme'))
+    name, description = 'Project', ''
+    for doc in docs:
+        for line in doc.get('excerpt', '').splitlines():
+            if line.startswith('# ') and name == 'Project':
+                candidate = _text(line[2:])
+                if candidate and len(candidate.split()) <= 6:
+                    name = candidate
+            elif line and not line.startswith(('#', '```', '-', '|')):
+                candidate = _text(line)
+                sentence = re.split(r'(?<=[.!?])\s+', candidate, maxsplit=1)[0]
+                if sentence and len(sentence.split()) <= 18:
+                    description = sentence.rstrip('.!?') + '.'
+            if description:
+                return name, description
+    return name, 'Its purpose is unclear from the available documentation.'
+
+
+def _summary(report):
+    project = report.get('current_project', report)
+    context = report.get('context', {})
+    name, description = _identity(project)
+    seen = {re.sub(r'\W+', '', description.casefold())}
+
+    def select(category, limit, words, prefix=''):
+        result = []
+        for finding in reversed(context.get(category, [])):
+            # Suggestions and heuristic classifications are not established decisions.
+            if finding.get('kind') != 'historical_statement':
+                continue
+            text = _text(finding.get('statement'))
+            key = re.sub(r'\W+', '', text.casefold())
+            rendered = f'{prefix}{text}.'
+            cost = len(rendered.split())
+            if not text or key in seen or cost > words:
+                continue
+            result.append(rendered)
+            seen.add(key)
+            words -= cost
+            if len(result) == limit:
+                break
+        return list(reversed(result))
+
+    decisions = select('decisions', 5, 45, 'Earlier choice: ')
+    problems = select('unresolved_problems', 2, 24, 'Previously reported: ')
+    where = select('user_goals', 1, 18, 'You previously wanted: ')
+    has_goal = bool(where)
+    where += select('attempted_fixes', 1, 18, 'You previously tried: ')
+    if not where:
+        where = select('user_statements', 2, 36, 'You previously said: ')
+    changes = bool(project.get('git', {}).get('working_tree'))
+    if not where:
+        where = ['There are local changes to review.' if changes
+                 else 'Your previous stopping point is unclear from the available context.']
+    actions = select('next_actions', 3, 45, 'Review the earlier plan: ')
+    candidates = []
+    if problems:
+        candidates.append('Check whether the reported problem still occurs.')
+    if changes:
+        candidates.append('Review the local changes before editing.')
+    if project.get('test_commands'):
+        candidates.append('Choose a relevant available test to check the next change.')
+    if decisions:
+        candidates.append('Confirm which earlier choices should still guide the work.')
+    if has_goal:
+        candidates.append('Identify which part of the earlier goal is still unfinished.')
+    # Ask about concrete gaps when evidence cannot support three implementation tasks.
+    candidates += [f'Identify the last unfinished task in {name}.',
+                   f'Confirm the intended next outcome for {name}.',
+                   f'Choose an acceptance check for the next {name} change.']
+    for candidate in candidates:
+        if len(actions) == 3:
+            break
+        key = re.sub(r'\W+', '', candidate.casefold())
+        if key not in seen:
+            actions.append(candidate)
+            seen.add(key)
+    result = {'project': {'name': name, 'description': description},
+              'where_you_left_off': where, 'previous_decisions': decisions,
+              'unresolved': problems, 'next_steps': actions}
+    incomplete = (report.get('coverage', {}).get('partial')
+                  or ('current_project' in report and not report.get('sessions'))
+                  or any(item.get('coverage', {}).get('partial') or not item.get('coverage', {}).get('reached_eof')
+                         for item in report.get('sessions', [])))
+    if incomplete:
+        result['warning'] = ('Some historical context may be missing.' if 'current_project' in report
+                             else 'Some project context may be missing.')
+    return result
 
 
 def present(report, *, verbose=False):
@@ -32,38 +134,7 @@ def present(report, *, verbose=False):
                       or report.get('match_counts', {}).get('unsupported')),
                   'conversation_read': False}
     else:
-        project = report.get('current_project', report)
-        git = project.get('git', {})
-        context = report.get('context', {})
-        def items(category):
-            return [{key: item.get(key) for key in ('statement', 'kind', 'current_status', 'evidence', 'timestamp')}
-                    for item in context.get(category, [])[-3:]]
-        docs = project.get('documentation', [])
-        result = {'project': {'description_evidence': [{'path': item.get('path'),
-                      'excerpt': item.get('excerpt', '')[:400], 'evidence': item.get('evidence', [])} for item in docs[:1]],
-                      'branch': git.get('branch'), 'working_changes': len(git.get('working_tree', []))},
-                  'where_i_left_off': items('next_actions') or items('user_goals') or items('user_statements'),
-                  'past_decisions': items('decisions'), 'unresolved_problems': items('unresolved_problems'),
-                  'next_actions': [
-                      'Preserve current working changes before editing (requires write approval).' if git.get('working_tree')
-                      else 'Confirm the next milestone from current project documentation.',
-                      'Verify the reported problem against current files; execution needs separate approval.' if items('unresolved_problems')
-                      else 'Review available test commands; execution needs separate approval.',
-                      'Choose one small next change grounded in the evidence before requesting edit approval.'],
-                  'confidence': 'Historical statements require verification against current files.' if 'current_project' in report
-                      else 'File/Git evidence only; past intent is unknown.',
-                  'coverage_note': 'Scoped evidence; exclusions apply. No complete-project guarantee.',
-                  'incomplete': bool(report.get('coverage', {}).get('partial') or project.get('coverage', {}).get('partial')
-                      or any(not item.get('coverage', {}).get('reached_eof') for item in report.get('sessions', []))),
-                  'tests': project.get('test_execution', {}).get('status', 'not_run'),
-                  'evidence': {}}
-        used = set(git.get('evidence', []))
-        for item in result['project']['description_evidence'] + result['where_i_left_off'] + result['past_decisions'] + result['unresolved_problems']:
-            used.update(item.get('evidence') or [])
-        for label, entries in [('current', project.get('evidence', [])),
-                               ('historical', report.get('evidence', []) if 'current_project' in report else [])]:
-            result['evidence'][label] = [{key: entry[key] for key in ('id', 'source', 'path', 'line', 'timestamp', 'role') if key in entry}
-                                        for entry in entries if entry.get('id') in used]
+        result = _summary(report)
     if verbose:
         result['diagnostics'] = report
     return result
@@ -71,7 +142,8 @@ def present(report, *, verbose=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--verbose', action='store_true', help='Include private diagnostics; does not grant additional access.')
+    parser.add_argument('--verbose', '--details', dest='verbose', action='store_true',
+                        help='Include private evidence/diagnostics; does not grant additional access.')
     args = parser.parse_args(argv)
     try:
         raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)

@@ -27,9 +27,32 @@ Use $repo-rescue to rescue the project at '.'.
 For another folder, replace `'.'` with its quoted path. With a custom `CODEX_HOME`,
 install in its `skills/repo-rescue` folder instead of the default above.
 
-You get a concise report: what the project is, where you left off, important past
-decisions, unresolved problems, **three next actions**, and evidence/confidence.
+You get a short report: the project, where you left off, previous decisions,
+meaningful unresolved problems and **three practical next steps**. Evidence stays
+available through details. The normal report aims for fewer than 200 words.
 Unknowns stay unknown. Nothing is installed, tested or edited by a rescue request.
+
+For example, with fictional project context:
+
+> **Tiny Harbor** — A small fishing game about building a harbor.
+>
+> **Where you left off**
+> You planned timing-based fishing. The recovered context does not establish
+> whether it was implemented.
+>
+> **Previous decisions**
+> - A seven-minute day/night cycle.
+> - A maximum of three boats.
+>
+> **Unresolved**
+> Boats were reported to disappear after reloading.
+>
+> **Next steps**
+> 1. Reproduce the reload problem with a saved boat.
+> 2. Check how saved boats are restored.
+> 3. Verify that a fix keeps boats across a reload.
+
+If recovery is partial, the report adds just: “Some historical context may be missing.”
 
 ## Optional past-session context
 
@@ -70,13 +93,15 @@ publication. Reading session context does not grant permission to save a handoff
 Use $repo-rescue to rescue '.' in verbose mode.
 ```
 
-Verbose adds relevant coverage, limits, evidence IDs and diagnostic reasons.
+You can also ask “show details.” Details add source references, confidence,
+coverage, limits and diagnostic reasons without cluttering the normal report.
 It never grants additional access or bypasses approvals. Internal approval tokens
 can contain private metadata; keep diagnostic output local.
 
 For CLI users, existing scanners still return their full JSON contract. A separate
 read-only presenter accepts already-collected JSON on stdin and returns a compact
-view; `--verbose` includes the original diagnostics. It does not scan, recover,
+view; `--verbose` (or `--details`) includes the original evidence and diagnostics.
+It does not scan, recover,
 write files or execute anything. Codex composes the final prose from the evidence.
 
 ## Beta limits
