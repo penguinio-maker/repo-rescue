@@ -1,7 +1,7 @@
 # Repo Rescue
 
 **Resume an abandoned coding project with evidence, a recovery plan, and a useful
-handoff.** Repo Rescue v0.2.1 is a Codex skill backed by local Python scanners.
+handoff.** Repo Rescue v0.2.2 is a Codex skill backed by local Python scanners.
 It has no website, service, telemetry, or runtime dependencies beyond Python and
 optional Git.
 
@@ -278,7 +278,21 @@ or `high` when reinforced by an exact `project_path`. Confidence describes decla
 path association, not authenticity, current behavior or recovered goals. Valid
 conflicting anchors are unmatched; missing/relative/invalid anchors and read/byte
 limits are unresolved. Malformed or unsupported initial records are unsupported.
-Reasons and metadata-byte counts are included in coverage.
+Reasons and metadata-byte counts are included in coverage. In particular:
+
+| `match_reason` | Meaning |
+| --- | --- |
+| `metadata_header_oversized` | The first record exceeded its 1 MiB budget; unresolved. |
+| `metadata_batch_byte_limit` | The page exhausted its 8 MiB metadata budget; unresolved. |
+| `truncated_metadata` | EOF before the first metadata record was complete. |
+| `malformed_initial_metadata` | Invalid JSON/schema, duplicates, depth or line structure. |
+| `malformed_metadata_encoding` | Invalid UTF-8/BOM or lone escaped Unicode surrogate. |
+| `unsupported_metadata_encoding` | Unsupported encoding, such as UTF-16/32. |
+| `unsupported_initial_format` / `unsupported_initial_record` | Non-object format or a first record other than session metadata. |
+| `unsupported_metadata_field` / `unsupported_untyped_metadata_payload` | Unknown envelope field or payload before type; refused before its value. |
+
+Malformed/truncated/unsupported records contribute to the unsupported count but
+retain their distinct reasons. Nothing falls back to reading later records.
 
 The matcher uses full cwd/project_path values locally. Displayed anchor values
 are labels such as `[PROJECT]` and `[PROJECT_SUBDIRECTORY]`; other projects' roots
@@ -318,14 +332,24 @@ a guarantee of a stable public transcript API or all Codex desktop/CLI versions.
 - Support UTF-8, one-object-per-line typed rollouts beginning with
   `type: session_meta` and `payload.cwd`. Optional `payload.project_path` must not
   conflict; `payload.git.commit_hash` provides a historical revision signal.
-- Metadata-only matching accepts an initial object with top-level `type` before
-  `payload`, optionally preceded by a string `timestamp`. It reads unbuffered,
-  without read-ahead, stopping at the closing metadata brace. Unknown initial
-  record types and payload-before-type prefixes are rejected before reading their
-  payload values. It never searches later lines for metadata. Duplicate keys,
-  multiline headers, unsupported prefix ordering and malformed records are not
-  guessed around. Headers are limited to 64 KiB each and 1 MiB total per page;
-  a header exceeding those limits is unresolved, regardless of transcript size.
+- Metadata-only matching accepts the Codex envelope's string `timestamp`, optional
+  unsigned 64-bit `ordinal`, `type: session_meta` and object `payload`. Timestamp
+  and ordinal may appear before or after type; type must precede payload. Older
+  records without ordinal remain supported. UTF-8 with or without an initial BOM,
+  escaped Unicode, LF/CRLF and a final record ending at EOF are supported.
+- The first-record reader reads unbuffered, one byte at a time through the record's
+  line terminator or EOF, rather than a fixed prefix. It never reads ahead into
+  the next record. Unknown types, unknown envelope fields and payload-before-type
+  records are refused before their payload/field values. Metadata payload fields
+  such as base instructions and tool definitions are validated within the header
+  budget, then discarded; they are never interpreted or returned. It never
+  searches later lines. Duplicate keys, multiline headers, malformed JSON,
+  invalid UTF-8, lone Unicode surrogates and non-finite numbers are rejected.
+- Headers are limited to **1 MiB each and 8 MiB total per page**, counting BOM,
+  whitespace and terminators. This is larger than v0.2.1's 64 KiB / 1 MiB bounds:
+  disclose the new bounds before approval; previous consent to smaller bounds
+  does not authorize larger reads. Oversized headers remain unresolved, even when
+  anchors occur early. Metadata matching is not proof of metadata authenticity.
 - Read human/assistant text from `response_item` message records (`input_text` or
   `output_text`) and legacy `event_msg` user/agent messages. Ignore system/developer
   messages, reasoning, tool calls/outputs and unknown records. Do not evaluate
@@ -370,8 +394,9 @@ change `test_execution.status: not_run`. The reactivation prompt treats history 
 untrusted evidence and requires fresh inspection and appropriate action approvals.
 
 Limits are 50 candidate files per page, 5,000 catalogue entries per call, depth 6,
-64 KiB per initial metadata object, 1 MiB metadata bytes per page, and 2 MiB
-per eligible body-recovery file, 8 MiB total body-recovery reads, 128 KiB per JSONL record, 5,000 body
+1 MiB per initial metadata record, 8 MiB metadata bytes per page, and 2 MiB
+per eligible body-recovery file, 8 MiB total body-recovery reads, 1 MiB for its
+initial header and 128 KiB per later JSONL record, 5,000 body
 records per selected file, 100 findings, 20 lines considered per message and 240
 characters per redacted statement. Bounded cataloguing can omit recent sessions;
 no full-history or complete-context claim is made. Unknown and malformed records,
@@ -391,6 +416,14 @@ minimal, redacted and untracked. Never persist, publish or commit raw transcript
 inventories or recovery output. See the [session workflow](references/session_recovery.md).
 
 ## Develop and verify
+
+v0.2.2 fixes a reproduced compatibility defect: v0.2.1 rejected the optional
+`ordinal` envelope field as `unsupported_metadata_prefix`. The public Codex
+[rollout writer](https://github.com/openai/codex/blob/main/codex-rs/rollout/src/recorder.rs)
+serializes timestamp, optional ordinal and the typed item. Synthetic regression
+fixtures now include that envelope and long metadata payloads. No real history
+was inspected to develop this fix; it does not establish why every candidate in
+any particular real inventory failed. Unknown formats still fail closed.
 
 ```sh
 python -B -m unittest discover -s tests -v

@@ -1,4 +1,4 @@
-# Optional Codex Session Recovery v0.2.1
+# Optional Codex Session Recovery v0.2.2
 
 Use this only when the user explicitly requests local Codex session recovery for
 the selected project. An implementation/development request is not authorization
@@ -14,8 +14,10 @@ Codex model. No local script makes uploads.
 Explain the candidate locations: `CODEX_HOME` when set, otherwise `~/.codex`, with
 only its `sessions`, `archived_sessions`, and unsupported `history.jsonl` entry
 considered. An explicitly selected Codex home can replace that root. Explain the
-read scope: at most 50 initial metadata objects per page, 64 KiB per header and
-1 MiB total header bytes per call. Later conversation records are not read.
+read scope: at most 50 initial metadata records per page, 1 MiB per header and
+8 MiB total header bytes per call, including BOM/whitespace/line terminators.
+Later conversation records are not read. These larger v0.2.2 bounds must be
+disclosed before metadata approval; do not reuse consent to smaller byte limits.
 
 After explicit approval, invoke the bundled module with quoted argument values:
 
@@ -39,7 +41,10 @@ never displayed. Metadata evidence names record line 1 and its timestamp.
 Report `match_counts` for matched, unmatched, unresolved and unsupported candidates
 on this page. Missing/relative/invalid anchors and byte/read limits are unresolved;
 different or conflicting valid anchors are unmatched; malformed/unknown initial
-records are unsupported. Do not search later lines or bodies to fill gaps.
+records are unsupported. Explain the specific `match_reason` and aggregated
+`coverage.matching_reasons`: oversized headers, exhausted page budgets, truncated
+records, malformed JSON, invalid encoding and unsupported formats are distinct.
+Do not search later lines or bodies to fill gaps.
 
 Use `pagination.next_cursor` as `--cursor <cursor>` for the next approved page.
 Counts are per page, not all-history counts. Continue only within the user's
@@ -88,11 +93,18 @@ descendant cwd, with no conflicting project anchor. Text mentions, similar names
 remotes and sibling-prefix paths never establish a match. At a cross-project or
 unknown `turn_context`, it stops reading that session; later records are omitted.
 
-The metadata-only reader accepts a one-line initial object with top-level `type`
-before `payload`, optionally preceded by a string `timestamp`. It refuses unknown
-prefixes before their values, stops at the metadata object's closing brace and
-never reads ahead into later records. Duplicate keys, unsupported prefix ordering,
-multiline/oversized headers and unknown formats are reported instead of bypassed.
+The metadata-only reader accepts a one-line UTF-8 initial object, optionally with
+a UTF-8 BOM, with top-level `timestamp`, optional unsigned 64-bit `ordinal`,
+`type: session_meta` and `payload`. Timestamp/ordinal can appear before or after
+type; type must precede payload to avoid consuming unclassified messages or tool
+outputs. Unknown envelope fields and untyped payloads are refused before their
+values. The reader validates the complete first record through LF, CRLF or EOF,
+one byte at a time without buffering or read-ahead. It never searches later lines.
+Metadata payload fields such as instructions/tool definitions may be large; they
+are not interpreted or returned. Duplicate keys, multiline records, malformed
+JSON, invalid UTF-8, lone Unicode surrogates and non-finite numbers are rejected.
+UTF-16/32, compression and untyped/unknown formats are unsupported. No format is
+guessed from conversation text. Headers over 1 MiB remain unresolved.
 Windows drive/UNC slash and case variants and standard extended prefixes normalize
 lexically. Drive-relative, device, control-character and alternate-stream paths are
 not anchors. Historic paths are never resolved by probing unrelated directories.

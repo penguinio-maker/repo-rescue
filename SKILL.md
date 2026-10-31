@@ -5,7 +5,7 @@ metadata:
   short-description: Recover project context and plan the next steps
 ---
 
-# Repo Rescue v0.2.1
+# Repo Rescue v0.2.2
 
 Use Python 3.11+ and the bundled `scripts/inspect_project.py`. Git is optional.
 This skill supports **rescue** and **checkpoint**. Session recovery is optional and
@@ -15,6 +15,9 @@ Only for an explicitly requested session-assisted recovery, follow
 bounded initial metadata matching, show the matching shortlist, then request
 separate approval for selected transcript bodies. Neither authorizes checkpoint
 writes. Stat-only discovery remains available without opening transcript files.
+Metadata matching reads only a bounded first JSONL record, including optional
+Codex `ordinal` metadata. Report header size, encoding and format failures from
+the session module; never inspect later records to work around an unsupported header.
 
 ## Boundaries
 

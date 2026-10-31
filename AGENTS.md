@@ -23,7 +23,7 @@ Keep the scanner standard-library-only and read-only. Never execute discovered
 project commands. Preserve explicit checkpoint approval in SKILL.md. Do not add
 telemetry, network calls, or automatic report persistence. Optional v0.2 session
 recovery must stay in its separate module, disabled by default, with project opt-in,
-explicit approval for v0.2.1 metadata-header matching, and a separate snapshot-bound
+explicit approval for metadata-header matching, and a separate snapshot-bound
 approval for selected transcript bodies. Test only generated synthetic
 history; never inspect real Codex history during development or publish transcripts.
 Use a public GitHub handle and a GitHub noreply email for commits after verifying

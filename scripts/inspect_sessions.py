@@ -29,8 +29,8 @@ MAX_LINE_BYTES = 128 * 1024
 MAX_RECORDS = 5000
 MAX_FINDINGS = 100
 MAX_SNIPPET = 240
-MAX_METADATA_BYTES = 64 * 1024
-MAX_METADATA_TOTAL_BYTES = 1024 * 1024
+MAX_METADATA_BYTES = 1024 * 1024
+MAX_METADATA_TOTAL_BYTES = 8 * 1024 * 1024
 FILE_NAME = re.compile(r"(?:rollout|session)-[A-Za-z0-9_.-]+\.jsonl$")
 LABELS = {
     "goal": "user_goals", "decision": "decisions", "tried": "attempted_fixes",
@@ -268,81 +268,138 @@ def discover(project, *, opt_in_project=None, codex_home=None, cursor=None):
 
 
 class MetadataReader:
-    """No read-ahead: stop at the initial metadata object, or before unknown payloads."""
+    """Bounded first JSONL record, without buffering or reads past its terminator.
+
+    Confirm the envelope's type before consuming payload values. Unknown envelope
+    keys are refused before their values, rather than risking a message/tool read.
+    """
     def __init__(self):
         self.bytes_read = 0
 
     def record(self, source):
         data = bytearray()
 
-        def take():
+        def take(*, eof=False):
             if len(data) >= MAX_METADATA_BYTES:
-                raise SessionError("metadata_file_byte_limit")
+                raise SessionError("metadata_header_oversized")
             if self.bytes_read >= MAX_METADATA_TOTAL_BYTES:
                 raise SessionError("metadata_batch_byte_limit")
             byte = source.read(1)
             if not byte:
+                if eof:
+                    return byte
                 raise SessionError("truncated_metadata")
             self.bytes_read += 1
             data.extend(byte)
+            if byte == b"\x00":
+                raise SessionError("unsupported_metadata_encoding")
+            return byte
+
+        def content():
+            byte = take()
             if byte in {b"\n", b"\r"}:
                 raise SessionError("malformed_initial_metadata")
             return byte
 
         def nonspace():
-            byte = take()
+            byte = content()
             while byte in {b" ", b"\t"}:
-                byte = take()
+                byte = content()
             return byte
 
-        def string(first, limit):
+        def string(first):
             if first != b'"':
-                raise SessionError("unsupported_metadata_prefix")
+                raise SessionError("malformed_initial_metadata")
             raw = bytearray(first)
             escaped = False
-            while len(raw) <= limit:
-                byte = take()
+            while True:
+                byte = content()
                 raw.extend(byte)
                 if byte == b'"' and not escaped:
                     try:
                         return json.loads(raw.decode("utf-8"))
-                    except (ValueError, UnicodeError):
+                    except UnicodeError:
+                        raise SessionError("malformed_metadata_encoding") from None
+                    except ValueError:
                         raise SessionError("malformed_initial_metadata") from None
                 escaped = byte == b"\\" and not escaped
-            raise SessionError("unsupported_metadata_prefix")
 
-        if nonspace() != b"{":
-            raise SessionError("unsupported_metadata_prefix")
+        first = take()
+        if first in {b"\xff", b"\xfe"}:
+            raise SessionError("unsupported_metadata_encoding")
+        if first == b"\xef":
+            if take() != b"\xbb" or take() != b"\xbf":
+                raise SessionError("malformed_metadata_encoding")
+            first = nonspace()
+        while first in {b" ", b"\t"}:
+            first = content()
+        if first != b"{":
+            raise SessionError("unsupported_initial_format")
+        record_type, fields = None, set()
         while True:
-            key = string(nonspace(), 128)
+            key = string(nonspace())
+            if key in fields:
+                raise SessionError("malformed_initial_metadata")
+            fields.add(key)
             if nonspace() != b":":
                 raise SessionError("malformed_initial_metadata")
+            delimiter = None
             if key == "type":
-                if string(nonspace(), 64) != "session_meta":
+                record_type = string(nonspace())
+                if record_type != "session_meta":
                     raise SessionError("unsupported_initial_record")
+            elif key == "timestamp":
+                string(nonspace())
+            elif key == "ordinal":
+                # Codex's RolloutLineRef includes this optional u64 before type.
+                byte = nonspace()
+                if byte not in b"0123456789" or len(byte) != 1:
+                    raise SessionError("malformed_initial_metadata")
+                while byte in b"0123456789":
+                    byte = content()
+                delimiter = byte
+            elif key == "payload":
+                if record_type != "session_meta":
+                    raise SessionError("unsupported_untyped_metadata_payload")
+                if nonspace() != b"{":
+                    raise SessionError("malformed_initial_metadata")
+                stack, quoted, escaped = [b"{"], False, False
+                while stack:
+                    byte = content()
+                    if quoted:
+                        if byte == b'"' and not escaped:
+                            quoted = False
+                        escaped = byte == b"\\" and not escaped
+                    elif byte == b'"':
+                        quoted, escaped = True, False
+                    elif byte in {b"{", b"["}:
+                        stack.append(byte)
+                        if len(stack) > 64:
+                            raise SessionError("malformed_initial_metadata")
+                    elif byte in {b"}", b"]"}:
+                        if stack.pop() != (b"{" if byte == b"}" else b"["):
+                            raise SessionError("malformed_initial_metadata")
+            else:
+                raise SessionError("unsupported_metadata_field")
+            delimiter = delimiter or nonspace()
+            while delimiter in {b" ", b"\t"}:
+                delimiter = content()
+            if delimiter == b"}":
                 break
-            if key != "timestamp":
-                # Reject payload-before-type without consuming its value.
-                raise SessionError("unsupported_metadata_prefix")
-            string(nonspace(), 128)
-            if nonspace() != b",":
+            if delimiter != b",":
                 raise SessionError("malformed_initial_metadata")
-        stack, quoted, escaped = [b"{"], False, False
-        while stack:
+
+        # Validate the whole first record, including its trailer, but never ask
+        # for a byte from the next JSONL record. A final record may end at EOF.
+        byte = take(eof=True)
+        while byte in {b" ", b"\t"}:
+            byte = take(eof=True)
+        if byte == b"\r":
             byte = take()
-            if quoted:
-                if byte == b'"' and not escaped:
-                    quoted = False
-                escaped = byte == b"\\" and not escaped
-            elif byte == b'"':
-                quoted, escaped = True, False
-            elif byte in {b"{", b"["}:
-                stack.append(byte)
-                if len(stack) > 64:
-                    raise SessionError("malformed_initial_metadata")
-            elif byte in {b"}", b"]"}:
-                if stack.pop() != (b"{" if byte == b"}" else b"["):
-                    raise SessionError("malformed_initial_metadata")
+            if byte != b"\n":
+                raise SessionError("malformed_initial_metadata")
+        elif byte not in {b"", b"\n"}:
+            raise SessionError("malformed_initial_metadata")
 
         def unique_fields(pairs):
             result = {}
@@ -351,11 +408,32 @@ class MetadataReader:
                     raise ValueError
                 result[key] = value
             return result
+
+        def valid_unicode(value):
+            if isinstance(value, str):
+                value.encode("utf-8")  # Reject lone escaped UTF-16 surrogates.
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    valid_unicode(key)
+                    valid_unicode(item)
+            elif isinstance(value, list):
+                for item in value:
+                    valid_unicode(item)
+
+        def invalid_constant(value):
+            raise ValueError
+
         try:
-            record = json.loads(data.decode("utf-8"), object_pairs_hook=unique_fields)
+            record = json.loads(data.decode("utf-8-sig"), object_pairs_hook=unique_fields,
+                                parse_constant=invalid_constant)
+            valid_unicode(record)
             if record.get("type") != "session_meta" or not isinstance(record.get("payload"), dict):
                 raise ValueError
-        except (ValueError, UnicodeError, RecursionError):
+            if "ordinal" in record and (type(record["ordinal"]) is not int or not 0 <= record["ordinal"] < 2 ** 64):
+                raise ValueError
+        except UnicodeError:
+            raise SessionError("malformed_metadata_encoding") from None
+        except (ValueError, RecursionError):
             raise SessionError("malformed_initial_metadata") from None
         return record, hashlib.sha256(data).hexdigest()
 
@@ -423,20 +501,21 @@ class RecordReader:
         self.bytes_read = 0
         self.counts = Counter()
 
-    def record(self, source):
+    def record(self, source, *, header=False):
         remaining = MAX_TOTAL_BYTES - self.bytes_read
         if remaining <= 0:
             self.counts["total_bytes_limit"] += 1
             return None, True
-        raw = source.readline(min(MAX_LINE_BYTES + 1, remaining))
+        limit = MAX_METADATA_BYTES if header else MAX_LINE_BYTES
+        raw = source.readline(min(limit + 1, remaining))
         self.bytes_read += len(raw)
         if not raw:
             return None, True
-        if len(raw) > MAX_LINE_BYTES or (len(raw) == remaining and not raw.endswith(b"\n")):
+        if len(raw) > limit or (len(raw) == remaining and not raw.endswith(b"\n")):
             self.counts["line_or_total_bytes_limit"] += 1
             return None, True
         try:
-            record = json.loads(raw.decode("utf-8"))
+            record = json.loads(raw.decode("utf-8-sig" if header else "utf-8"))
             if not isinstance(record, dict):
                 raise ValueError
             return record, False
@@ -534,7 +613,7 @@ def recover(project, *, opt_in_project=None, review_id=None, session_refs=(), co
                 raise SessionError("session_changed")
             # Unbuffered reads do not pull conversation bytes while checking the header.
             with path.open("rb", buffering=0) as source:
-                header, done = reader.record(source)
+                header, done = reader.record(source, header=True)
                 metadata = header.get("payload") if header else None
                 if not header or header.get("type") != "session_meta" or not isinstance(metadata, dict):
                     state["status"] = "unsupported_header"

@@ -40,7 +40,7 @@ class SessionCase(unittest.TestCase):
         self.addCleanup(self.env.stop)
 
     def header(self, cwd=None, **extra):
-        return {"type": "session_meta", "timestamp": OLD_TIME,
+        return {"timestamp": OLD_TIME, "ordinal": 0, "type": "session_meta",
                 "payload": {"id": "fictional-session", "cwd": str(cwd or self.root),
                             "timestamp": OLD_TIME, **extra}}
 
@@ -436,6 +436,8 @@ class SmartDiscoveryCase(unittest.TestCase):
             def read(self, size=-1):
                 case.assertEqual(size, 1, "metadata matching attempted read-ahead")
                 if self.tell() >= len(self.getvalue()):
+                    if self.getvalue().endswith(b"}"):
+                        return b""  # A complete final record may have no newline.
                     raise AssertionError("conversation bytes were requested")
                 return super().read(size)
             def readline(self, size=-1):
@@ -513,6 +515,123 @@ class SmartDiscoveryCase(unittest.TestCase):
         self.assertEqual(report["match_counts"]["matched"], 1)
         self.assertNotIn("instructions", json.dumps(report))
 
+    def test_codex_ordinal_envelope_matches_without_reading_later_records(self):
+        # Fictional values, shaped like Codex's RolloutLineRef serialization.
+        header = {"timestamp": OLD_TIME, "ordinal": 0, "type": "session_meta",
+                  "payload": {"id": "fictional-session", "cwd": str(self.root),
+                              "originator": "fictional-cli", "cli_version": "0.0.0",
+                              "base_instructions": {"text": "fictional instructions"},
+                              "dynamic_tools": [], "git": {"commit_hash": "a" * 40}}}
+        prefix = json.dumps(header).encode() + b"\r\n"
+        path = self.write([header, self.msg("Goal: BODY_SENTINEL")])
+        with self.initial_only({path: prefix}):
+            report = self.match()
+        self.assertEqual(report["match_counts"]["matched"], 1)
+        self.assertEqual(report["coverage"]["metadata_bytes_read"], len(prefix))
+        self.assertNotIn("fictional instructions", json.dumps(report))
+        self.assertNotIn("BODY_SENTINEL", json.dumps(report))
+
+    def test_long_initial_record_and_bom_match_then_require_body_approval(self):
+        header = {"timestamp": OLD_TIME, "ordinal": 0, "type": "session_meta",
+                  "payload": self.header(base_instructions={"text": "fictional " * 20000})["payload"]}
+        prefix = b"\xef\xbb\xbf" + json.dumps(header).encode() + b"\n"
+        self.assertGreater(len(prefix), 128 * 1024)
+        path = self.write([])
+        path.write_bytes(prefix + json.dumps(self.msg("Goal: approved fictional context")).encode() + b"\n")
+        with self.initial_only({path: prefix}):
+            report = self.match()
+        self.assertEqual(report["match_counts"]["matched"], 1)
+        self.assertEqual(report["coverage"]["metadata_bytes_read"], len(prefix))
+        self.assertNotIn("approved fictional context", json.dumps(report))
+        with patch.object(sessions, "history_home", side_effect=AssertionError("body gate bypassed")):
+            with self.assertRaisesRegex(sessions.SessionError, "body_approval_required"):
+                sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
+                    codex_home=self.home, session_refs=[report["matching_sessions"][0]["session_ref"]])
+        result = sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
+            codex_home=self.home, review_id=report["review_id"],
+            session_refs=[report["matching_sessions"][0]["session_ref"]])
+        self.assertEqual(result["context"]["user_goals"][0]["statement"], "Goal: approved fictional context")
+
+    def test_utf8_unicode_and_escaped_paths_in_headers(self):
+        for index, ensure_ascii in enumerate((True, False)):
+            root = self.base / "fictional-jardin-\u96ea-\U0001f331"
+            root.mkdir(exist_ok=True)
+            header = {"ordinal": 0, "type": "session_meta", "timestamp": OLD_TIME,
+                      "payload": self.header(cwd=root, instructions='quoted "{}" \\ \u00e9')["payload"]}
+            prefix = json.dumps(header, ensure_ascii=ensure_ascii).encode() + b"\n"
+            path = self.write([], f"sessions/rollout-utf8-{index}.jsonl")
+            path.write_bytes(prefix + b'{"type":"response_item","payload":"DO_NOT_READ"}\n')
+            with self.initial_only({path: prefix}):
+                report = sessions.match_metadata(root, opt_in_project=root,
+                    metadata_approval_project=root, codex_home=self.home)
+            self.assertEqual(report["match_counts"]["matched"], 1)
+            path.unlink()  # Synthetic fixture only; keep the next inventory isolated.
+
+    def test_encoding_errors_and_unsupported_formats_are_distinct(self):
+        fixtures = [(b"\xff\xfe", "unsupported_metadata_encoding"),
+                    (b"\xfe\xff", "unsupported_metadata_encoding"),
+                    (b"\x00", "unsupported_metadata_encoding"),
+                    (b"\x1f\x8b", "unsupported_initial_format"),
+                    (b"[]", "unsupported_initial_format"),
+                    (b"\xef\xbbX", "malformed_metadata_encoding"),
+                    (b'{"type":"session_meta","payload":{"cwd":"\xff"}}\n', "malformed_metadata_encoding"),
+                    (b'{"type":"session_meta","payload":{"cwd":"\\ud800"}}\n', "malformed_metadata_encoding"),
+                    (b'{"timestamp":"' + OLD_TIME.encode() + b'","ordinal":true,', "malformed_initial_metadata")]
+        for index, (prefix, reason) in enumerate(fixtures):
+            path = self.write([], f"sessions/rollout-encoding-{index}.jsonl")
+            path.write_bytes(prefix + b"\nDO_NOT_READ")
+            with self.initial_only({path: prefix}):
+                report = self.match()
+            self.assertEqual(report["candidates"][0]["match_reason"], reason)
+            self.assertEqual(report["match_counts"]["unsupported"], 1)
+            self.assertNotIn("DO_NOT_READ", json.dumps(report))
+            path.unlink()
+
+    def test_first_record_boundary_rejects_bad_trailers_without_reading_next_line(self):
+        for suffix, reason in ((b" junk", "malformed_initial_metadata"),
+                               (b"\rX", "malformed_initial_metadata"),
+                               (b"\n", None), (b" \t\r\n", None)):
+            path = self.write([])
+            prefix = json.dumps(self.header()).encode() + suffix
+            path.write_bytes(prefix + b"\nDO_NOT_READ")
+            with self.initial_only({path: prefix}):
+                report = self.match()
+            if reason:
+                self.assertEqual(report["candidates"][0]["match_reason"], reason)
+            else:
+                self.assertEqual(report["match_counts"]["matched"], 1)
+
+    def test_valid_header_at_eof_and_exact_record_budget(self):
+        prefix = json.dumps(self.header()).encode()
+        header, _ = sessions.MetadataReader().record(io.BytesIO(prefix))
+        self.assertEqual(header["payload"]["cwd"], str(self.root))
+        for suffix in (b"\n", b"\r\n"):
+            with patch.object(sessions, "MAX_METADATA_BYTES", len(prefix + suffix)):
+                reader = sessions.MetadataReader()
+                reader.record(io.BytesIO(prefix + suffix + b"DO_NOT_READ"))
+                self.assertEqual(reader.bytes_read, len(prefix + suffix))
+
+    def test_oversized_truncated_and_malformed_headers_have_separate_reasons(self):
+        fixtures = [(b'{"type":"session_meta","payload":{"instructions":"' + b"x" * 512,
+                     "metadata_header_oversized", 256),
+                    (b'{"type":"session_meta","payload":{', "truncated_metadata", None),
+                    (b'{"type":"session_meta","payload":{\n', "malformed_initial_metadata", None)]
+        for prefix, reason, limit in fixtures:
+            with patch.object(sessions, "MAX_METADATA_BYTES", limit or sessions.MAX_METADATA_BYTES):
+                with self.assertRaisesRegex(sessions.SessionError, "^" + reason + "$"):
+                    sessions.MetadataReader().record(io.BytesIO(prefix))
+
+    def test_unknown_envelope_fields_refused_before_values_even_after_type(self):
+        for prefix in (b'{"timestamp":"' + OLD_TIME.encode() + b'","future":',
+                       b'{"type":"session_meta","content":',
+                       b'{"timestamp":"' + OLD_TIME.encode() + b'","ordinal":0,"type":"response_item"'):
+            path = self.write([])
+            path.write_bytes(prefix + b'"BODY_SENTINEL"}\n')
+            with self.initial_only({path: prefix}):
+                report = self.match()
+            self.assertEqual(report["match_counts"]["unsupported"], 1)
+            self.assertNotIn("BODY_SENTINEL", json.dumps(report))
+
     def test_oversized_transcripts_allow_matching_but_not_body_recovery(self):
         header = self.header()
         path = self.write([header])
@@ -534,7 +653,7 @@ class SmartDiscoveryCase(unittest.TestCase):
             report = self.match()
         self.assertEqual(report["match_counts"]["unresolved"], 1)
         self.assertEqual(report["coverage"]["metadata_bytes_read"], 20)
-        self.assertIn("metadata_file_byte_limit", report["coverage"]["matching_reasons"])
+        self.assertIn("metadata_header_oversized", report["coverage"]["matching_reasons"])
         with patch.object(sessions, "MAX_METADATA_TOTAL_BYTES", 10):
             report = self.match()
         self.assertEqual(report["coverage"]["metadata_bytes_read"], 10)
