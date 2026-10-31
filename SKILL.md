@@ -43,10 +43,20 @@ Interpret “verbose” as a presentation preference, never permission for more 
    Stop when the coordinator stops. A restart, larger budget or changed project/home
    requires renewed consent and a fresh scope. Never reuse an ID to restart silently.
 3. **Show a concise shortlist.** Follow [session recovery](references/session_recovery.md),
-   retaining raw JSON and approval IDs internally. Show at most three numbered
-   choices with date, size, project-match confidence and material incompleteness.
-   Mention more matches or search gaps in one sentence; offer more choices on
-   request. No matches: continue with files and explain that past intent is unknown.
+   retaining raw JSON and approval IDs internally. Show every eligible confirmed
+   match when there are 1–10. Above ten, show five oldest and five newest dated
+   choices, with “show all” available from the same results, without another search.
+   Each row shows only its number, approximate date, size and active status. Dates
+   and sizes do not establish content or usefulness; never recommend only the three
+   newest sessions or guess which contains planning versus recovery tests.
+   The coordinator compares approved header IDs with host `CODEX_THREAD_ID` /
+   `CODEX_SESSION_ID` (or a trusted explicit `--active-session-id`). No body reads
+   are needed. Exclude known active matches by default, including in “show all.”
+   If host/header identity is unavailable, say active status is unknown; never
+   guess from recency, size or filenames. Ask the user to choose known historical
+   sessions in the same body-consent question, without another preliminary prompt.
+   Mention excluded active sessions or search gaps briefly. No historical choices:
+   continue with files and explain that past intent is unknown.
    Do not switch projects or infer matches from conversation text.
 4. **Ask separately before reading conversations.** Identify the exact selected
    numbered sessions by date/size. Explain that past requests/replies may contain
@@ -71,8 +81,13 @@ Interpret “verbose” as a presentation preference, never permission for more 
    If bodies are declined, give the file-only report without pressure.
 
 For a compact view of already-collected evidence, use `scripts/present_report.py`
-with JSON on stdin and no file output. Its numbered choices map to the original
-shortlist order; keep original IDs in memory. It reads no project/history files and
+with JSON on stdin and no file output. `--all-sessions` shows all already-matched
+historical choices without granting body access. Keep the private mapping from
+`session_choices(report)` in memory: choice N maps to its Nth candidate, not the
+original raw array. It orders by header date and removes known active matches;
+numbers stay stable between compact/all views. Use that candidate's original
+session/approval IDs for the separately approved selection. Never renumber only
+the displayed subset. The presenter reads no project/history files and
 never grants access. It selects short, conservative text; Codex still synthesizes
 natural prose and grounds three practical actions in the retained evidence.
 Use the raw report to verify claims, not only the compact projection. Evidence

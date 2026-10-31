@@ -2,7 +2,7 @@
 
 Normal user experience is defined in [SKILL.md](../SKILL.md). Keep backend IDs,
 cursor values and diagnostic tables internal unless verbose detail is requested.
-Display numbered choices with dates, sizes, confidence and material gaps. Retain
+Display numbered choices with approximate dates, sizes and active status. Retain
 the original session/approval mapping in memory; the user approves named choices,
 not hashes. Translate errors into plain language without hiding incomplete reads.
 The separate explicit metadata and body gates below remain mandatory.
@@ -55,7 +55,26 @@ approval IDs, are operator consent assertions, not signed authorization or
 persistent single-use credentials. Conversation gates remain the assistant's job.
 Do not persist the plan, IDs, inventory or transcripts.
 
-Then show the concise shortlist and ask **one separate body question** naming the
+Then show all historical choices up to ten; above ten include both five oldest and
+five newest dated sessions and offer all choices from the same result. Never rank
+usefulness/content by date or size, or show only the three newest matches.
+`session_choices(report)` in the presenter supplies the private chronological,
+active-filtered choice-to-candidate mapping. The displayed number is its one-based
+index, not a raw inventory index. Keep numbers stable for `--all-sessions`; never
+rescan merely to expand the view. Known active sessions remain excluded in both
+views. Default rows contain only number, date, size and active status.
+
+The search coordinator observes `session_meta.payload.id` in the header already
+read under metadata approval; the original reader/schema are unchanged. It compares
+canonical UUIDs with host `CODEX_THREAD_ID`/`CODEX_SESSION_ID`, or an explicit
+`--active-session-id` from trusted host metadata. It returns only `is_active`
+(true/false/unknown), never the host/header IDs. Missing or invalid identities stay
+unknown; do not infer activity from dates, file size or filename. Explain unknown
+status briefly before asking the user to choose known historical sessions. Do not
+probe real history, bodies or unrelated files to resolve it. Active filtering is a
+choice default, not a replacement for per-session approval/identity revalidation.
+
+Ask **one separate body question** naming the
 exact selection (one or multiple sessions together, maximum 50). Joint approval
 maps to individual per-session IDs; repeat `--approve-bodies` and `--session` in
 one recovery call as below. Unrelated inventory changes never invalidate selected
@@ -96,9 +115,9 @@ a historical session. Without opt-in, do not run discovery or probe history. Wit
 metadata approval, never run `match` or open headers. A user may instead authorize
 the old `discover` action for filesystem metadata only; it never opens files.
 
-Keep `locations`, `matching_sessions` and each `approval_id` internally. Normally
-show at most three numbered matches with start/modification dates, size, confidence
-and material body-eligibility warnings. In verbose mode show relative references,
+Keep `locations`, `matching_sessions` and each `approval_id` internally. Apply the
+same up-to-ten/oldest-and-newest shortlist rule to legacy results; missing active
+status remains unknown. In verbose mode show confidence, relative references,
 match basis and technical coverage. Explain that confidence is lexical project-anchor
 confidence, not verification of historical claims. Full cwd/project_path values
 are used locally, then hidden behind project-relative labels; unrelated roots are

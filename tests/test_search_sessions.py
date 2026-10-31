@@ -12,7 +12,12 @@ from tests import test_sessions as fixtures
 
 
 class SearchCase(unittest.TestCase):
-    setUp = fixtures.SessionCase.setUp
+    def setUp(self):
+        fixtures.SessionCase.setUp(self)
+        active = patch.dict(search.os.environ, {'CODEX_THREAD_ID': 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+                                               'CODEX_SESSION_ID': ''})
+        active.start()
+        self.addCleanup(active.stop)
     header = fixtures.SessionCase.header
     msg = fixtures.SessionCase.msg
     write = fixtures.SessionCase.write

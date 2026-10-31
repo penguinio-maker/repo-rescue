@@ -64,7 +64,7 @@ The skill first inspects the project, then:
 
 1. Asks **once** to search local session metadata for this project across all batches,
    explaining locations and the total budget. Conversations stay unread.
-2. Searches within that approval automatically and shows a few relevant matches.
+2. Searches within that approval automatically and shows matching historical sessions.
 3. Asks **once more** to read your exact selection: one session or several named together.
 4. Combines approved historical statements with current files in the recovery report.
 
@@ -72,6 +72,16 @@ No hashes, terminal flags or pagination knowledge are needed. Declining session
 access still gives you a useful file/Git report. Asking about session recovery does
 not approve transcript reading. Approval covers only your selected sessions;
 changed selected files require fresh review and approval.
+
+The shortlist shows **all matches up to ten**. With more, it includes both the
+oldest and newest sessions and offers “show all.” Each numbered row contains only
+an approximate date, size and active status. Dates and sizes cannot tell us what
+was discussed or which session is useful; no conversation is read to rank choices.
+The current active session is excluded when identified by host/header metadata.
+If that identity is unavailable, the status is shown as unknown so you can choose
+sessions you know are historical. “Show all” keeps known active sessions excluded
+and does not read bodies or restart discovery. You can approve several choices
+together, such as “Read sessions 1, 4 and 7.”
 
 There is no extra skill-level confirmation to run the ordinary read-only scanner.
 Codex may still require host permission prompts; Repo Rescue never bypasses them.
@@ -112,6 +122,8 @@ can contain private metadata; keep diagnostic output local.
 For CLI users, existing scanners still return their full JSON contract. A separate
 read-only presenter accepts already-collected JSON on stdin and returns a compact
 view; `--verbose` (or `--details`) includes the original evidence and diagnostics.
+For a matching-session report, `--all-sessions` expands only the safe metadata
+shortlist. Numbering stays stable and technical identifiers remain hidden.
 It does not scan, recover,
 write files or execute anything. Codex composes the final prose from the evidence.
 

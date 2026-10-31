@@ -77,8 +77,8 @@ class PresentationCase(unittest.TestCase):
         raw['matching_sessions'] *= 5
         raw['pagination']['next_cursor'] = 'CURSOR_SENTINEL'
         view = present(raw)
-        self.assertEqual(len(view['sessions']), 3)
-        self.assertEqual(view['more_matches'], 2)
+        self.assertEqual(len(view['sessions']), 5)
+        self.assertEqual(view['more_matches'], 0)
         self.assertTrue(view['more_to_search'])
         self.assertNotIn('CURSOR_SENTINEL', json.dumps(view))
         for hidden in ('approval_id', 'review_id', 'snapshot', 'next_cursor', 'session_ref'):

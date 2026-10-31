@@ -1,11 +1,73 @@
 #!/usr/bin/env python3
 """Compact presentation of already-collected JSON; no project/history access."""
 import argparse
+from datetime import datetime, timezone
 import json
 import re
 import sys
 
 MAX_INPUT_BYTES = 8 * 1024 * 1024
+
+
+def _started(item):
+    value = item.get('session_started_at')
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        date = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return date.astimezone(timezone.utc) if date.tzinfo else None
+    except ValueError:
+        return None
+
+
+def session_choices(report):
+    """Private choice-to-evidence mapping; stable across compact/show-all views."""
+    matches = [item for item in report['matching_sessions'] if item.get('is_active') is not True]
+    latest = datetime.max.replace(tzinfo=timezone.utc)
+    return sorted(matches, key=lambda item: (_started(item) is None, _started(item) or latest))
+
+
+def _size(value):
+    if type(value) is not int or value < 0:
+        return 'Unknown'
+    if value >= 1024 * 1024:
+        return f'{value / (1024 * 1024):.1f} MiB'
+    return f'{value / 1024:.1f} KiB'
+
+
+def _shortlist(report, all_sessions):
+    choices = session_choices(report)
+    indexes = list(range(len(choices)))
+    if len(indexes) > 10 and not all_sessions:
+        dated = [index for index in indexes if _started(choices[index]) is not None]
+        edges = dated if dated else indexes
+        selected = set(edges[:5] + edges[-5:])
+        for index in indexes:
+            if len(selected) == 10:
+                break
+            selected.add(index)
+        indexes = sorted(selected)
+    rows = []
+    for index in indexes:
+        item = choices[index]
+        date = _started(item)
+        rows.append({'choice': index + 1, 'date': date.date().isoformat() if date else 'Unknown',
+                     'size': _size(item.get('size_bytes')), 'active': item.get('is_active')})
+    excluded = sum(item.get('is_active') is True for item in report['matching_sessions'])
+    message = ('Choose one or more sessions; dates and sizes do not reveal their contents.' if rows
+               else 'No matching historical sessions are available in this search.')
+    if len(choices) > len(rows):
+        message += ' Oldest and newest dated matches are shown; ask to see all.' if dated else ' Ask to see all matches.'
+    if excluded:
+        message += ' The active session is excluded.'
+    if any(item.get('is_active') is None for item in choices):
+        message += ' Active status is unknown for some sessions.'
+    return {'message': message, 'sessions': rows, 'more_matches': len(choices) - len(rows),
+            'show_all_option': len(choices) > len(rows), 'active_excluded': bool(excluded),
+            'more_to_search': bool(report.get('pagination', {}).get('next_cursor')),
+            'search_gaps': bool(report.get('coverage', {}).get('partial')
+                or report.get('match_counts', {}).get('unresolved') or report.get('match_counts', {}).get('unsupported')),
+            'conversation_read': False}
 
 
 def _text(value):
@@ -109,7 +171,7 @@ def _summary(report):
     return result
 
 
-def present(report, *, verbose=False):
+def present(report, *, verbose=False, all_sessions=False):
     if report.get('status') == 'disabled':
         result = {'message': 'Session recovery is off. Project inspection remains available.'}
     elif 'error' in report:
@@ -126,19 +188,7 @@ def present(report, *, verbose=False):
                    else 'Inspection could not finish. Continue with available file evidence.')
         result = {'message': message}
     elif 'matching_sessions' in report:
-        matches = report['matching_sessions']
-        result = {'message': 'Choose sessions to review.' if matches else 'No matching sessions found in this search.',
-                  'sessions': [{'choice': index, 'started': item.get('session_started_at'),
-                      'modified': item.get('modified_at'), 'size_bytes': item.get('size_bytes'),
-                      'project_confidence': item.get('confidence'),
-                      'may_be_incomplete': item.get('body_may_be_truncated', False)}
-                      for index, item in enumerate(matches[:3], 1)],
-                  'more_matches': max(0, len(matches) - 3),
-                  'more_to_search': bool(report.get('pagination', {}).get('next_cursor')),
-                  'search_gaps': bool(report.get('coverage', {}).get('partial')
-                      or report.get('match_counts', {}).get('unresolved')
-                      or report.get('match_counts', {}).get('unsupported')),
-                  'conversation_read': False}
+        result = _shortlist(report, all_sessions)
     else:
         result = _summary(report)
     if verbose:
@@ -150,6 +200,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--verbose', '--details', dest='verbose', action='store_true',
                         help='Include private evidence/diagnostics; does not grant additional access.')
+    parser.add_argument('--all-sessions', action='store_true', help='Show all already-matched historical choices; no body access.')
     args = parser.parse_args(argv)
     try:
         raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
@@ -158,7 +209,7 @@ def main(argv=None):
         report = json.loads(raw)
         if not isinstance(report, dict):
             raise ValueError
-        print(json.dumps(present(report, verbose=args.verbose), ensure_ascii=True, indent=2))
+        print(json.dumps(present(report, verbose=args.verbose, all_sessions=args.all_sessions), ensure_ascii=True, indent=2))
         return 0
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         print(json.dumps({'message': 'Expected a bounded scanner JSON report.'}))

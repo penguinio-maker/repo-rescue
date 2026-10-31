@@ -2,8 +2,10 @@
 """One approved, bounded metadata search. No transcript bodies, writes or network."""
 import json
 from collections import Counter
+import os
 import sys
 import time
+import uuid
 
 if __package__:
     from . import inspect_sessions as sessions
@@ -12,6 +14,31 @@ else:
 
 MAX_SEARCH_FILES = 500
 MAX_SEARCH_SECONDS = 30
+
+
+def _session_id(value):
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return None
+
+
+class SelectionMetadataReader(sessions.MetadataReader):
+    """Observe an ID in the already-approved header; never read extra records."""
+    def __init__(self, active_ids):
+        super().__init__()
+        self.active_ids = active_ids
+        self.is_active = None
+
+    def record(self, source):
+        self.is_active = None
+        record, digest = super().record(source)
+        session_id = _session_id(record['payload'].get('id'))
+        if session_id is not None and self.active_ids:
+            self.is_active = session_id in self.active_ids
+        return record, digest
 
 
 def search_limits():
@@ -39,7 +66,7 @@ def plan_search(project, *, opt_in_project=None, codex_home=None):
                               "Private metadata may be processed remotely by Codex. No uploads or persistence."}
 
 
-def search_metadata(project, *, opt_in_project=None, approval_id=None, codex_home=None):
+def search_metadata(project, *, opt_in_project=None, approval_id=None, codex_home=None, active_session_id=None):
     """Run one bounded search under scoped operator consent; never auto-restart."""
     root = sessions.project_consent(project, opt_in_project)
     if not isinstance(approval_id, str) or not approval_id:
@@ -51,10 +78,15 @@ def search_metadata(project, *, opt_in_project=None, approval_id=None, codex_hom
             raise sessions.SessionError("metadata_search_scope_changed_renew_approval")
 
     validate_scope()  # Reject changed locations/identities/limits before enumeration.
+    if active_session_id is not None and _session_id(active_session_id) is None:
+        raise sessions.SessionError('invalid_active_session_id')
+    values = ([active_session_id] if active_session_id is not None else
+              [os.environ.get('CODEX_THREAD_ID'), os.environ.get('CODEX_SESSION_ID')])
+    active_ids = {value for item in values if (value := _session_id(item)) is not None}
     deadline = time.monotonic() + MAX_SEARCH_SECONDS
     catalogue = sessions.discover(root, opt_in_project=root, codex_home=home, _catalogue=True)
     validate_scope()
-    reader = sessions.MetadataReader()  # Shared across every batch: never reset 8 MiB.
+    reader = SelectionMetadataReader(active_ids)  # Shared budget; no extra header/body reads.
     counts = Counter({name: 0 for name in ("matched", "unmatched", "unresolved", "unsupported")})
     reasons = Counter()
     inspected, matches = [], []
@@ -78,6 +110,7 @@ def search_metadata(project, *, opt_in_project=None, approval_id=None, codex_hom
             page = sessions.match_metadata(root, opt_in_project=root, metadata_approval_project=root,
                 codex_home=home, _inventory={"candidates": [candidate], "coverage": {}}, _reader=reader)
             validate_scope()
+            candidate['is_active'] = reader.is_active
             inspected.append(candidate)
             counts.update(page["match_counts"])
             reasons.update(page["coverage"]["matching_reasons"])
@@ -95,8 +128,8 @@ def search_metadata(project, *, opt_in_project=None, approval_id=None, codex_hom
     catalogue_gaps = any(omissions.get(reason) for reason in (
         "entry_limit", "depth_limit", "unreadable_entry", "unreadable_directory",
         "unavailable_or_linked_location", "linked_or_changed_entry"))
-    matches.sort(key=lambda item: (item.get("confidence") == "high",
-                                  item.get("session_started_at") or item["modified_at"]), reverse=True)
+    # Preserve every confirmed match. Presentation chooses a chronological view,
+    # not a content/usefulness ranking based on age, size or confidence.
     return {"schema_version": "1.0", "status": "body_approval_required" if matches else "no_matching_sessions",
             "project": ".", "locations": catalogue["locations"], "candidates": inspected,
             "matching_sessions": matches, "match_counts": dict(counts),
@@ -118,6 +151,7 @@ def main(argv=None):
         parser.add_argument("--session-opt-in", metavar="PROJECT")
         parser.add_argument("--codex-home")
         parser.add_argument("--approve-search", metavar="SCOPE_ID")
+        parser.add_argument('--active-session-id', help='Trusted host current-session ID; defaults to Codex host environment.')
         args = parser.parse_args(argv)
         if args.action == "plan":
             if args.approve_search:
@@ -125,7 +159,8 @@ def main(argv=None):
             result = plan_search(args.project, opt_in_project=args.session_opt_in, codex_home=args.codex_home)
         else:
             result = search_metadata(args.project, opt_in_project=args.session_opt_in,
-                                     approval_id=args.approve_search, codex_home=args.codex_home)
+                                     approval_id=args.approve_search, codex_home=args.codex_home,
+                                     active_session_id=args.active_session_id)
         print(json.dumps(result, indent=2, ensure_ascii=True))
         return 0
     except sessions.SessionError as error:
