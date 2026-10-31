@@ -36,6 +36,8 @@ MAX_EXTRACTED_CHARS = 16 * 1024
 MAX_PROCESS_SECONDS = 30
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_METADATA_TOTAL_BYTES = 8 * 1024 * 1024
+SESSION_ADAPTER = "0.2.4"
+WORLD_STATE_SECTIONS = {"model", "tools", "permissions", "agents_md", "environments"}
 FILE_NAME = re.compile(r"(?:rollout|session)-[A-Za-z0-9_.-]+\.jsonl$")
 LABELS = {
     "goal": "user_goals", "decision": "decisions", "tried": "attempted_fixes",
@@ -233,7 +235,8 @@ def discover(project, *, opt_in_project=None, codex_home=None, cursor=None):
               "line_bytes": MAX_LINE_BYTES, "records_per_file": MAX_RECORDS, "findings": MAX_FINDINGS,
               "message_chars": MAX_MESSAGE_CHARS, "input_text_chars": MAX_INPUT_TEXT_CHARS,
               "extracted_chars": MAX_EXTRACTED_CHARS, "processing_seconds": MAX_PROCESS_SECONDS,
-              "metadata_file_bytes": MAX_METADATA_BYTES, "metadata_batch_bytes": MAX_METADATA_TOTAL_BYTES}
+              "metadata_file_bytes": MAX_METADATA_BYTES, "metadata_batch_bytes": MAX_METADATA_TOTAL_BYTES,
+              "session_adapter": SESSION_ADAPTER}
     scope = hashlib.sha256(json.dumps([str(root), str(home), limits], sort_keys=True).encode()).hexdigest()
     # Page position depends on membership/order, not appends to live transcripts.
     # Body approvals below still bind full size/mtime snapshots for the page.
@@ -608,6 +611,52 @@ class RecordReader:
             return None, True
 
 
+def world_state_stop_reason(record, project):
+    """Recognize comparison metadata, never conversation text or instructions.
+
+    Deliberately narrower than Codex's extensible state map. Environment updates
+    must carry explicit in-project cwd evidence; do not reconstruct merge patches
+    or infer scope from a previously skipped snapshot.
+    """
+    if (set(record) - {"type", "timestamp", "ordinal", "payload"}
+            or timestamp(record.get("timestamp")) is None):
+        return "unsupported_world_state"
+    ordinal = record.get("ordinal")
+    if ordinal is not None and (type(ordinal) is not int or not 0 <= ordinal < 2 ** 64):
+        return "unsupported_world_state"
+    payload = record.get("payload")
+    if (not isinstance(payload, dict) or set(payload) != {"full", "state"}
+            or type(payload["full"]) is not bool or not isinstance(payload["state"], dict)):
+        return "unsupported_world_state"
+    state = payload["state"]
+    if (set(state) - WORLD_STATE_SECTIONS
+            or any(value is not None and not isinstance(value, dict) for value in state.values())):
+        return "unsupported_world_state"
+    stack, visited = [(state, 0)], 0
+    while stack:
+        value, depth = stack.pop()
+        visited += 1
+        if visited > 4096 or depth > 64:
+            return "unsupported_world_state"
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "cwd" and not within(item, project):
+                    return "cross_project_or_unknown_world_state"
+                if key == "project_path" and path_key(item) != project:
+                    return "cross_project_or_unknown_world_state"
+                stack.append((item, depth + 1))
+        elif isinstance(value, list):
+            stack.extend((item, depth + 1) for item in value)
+    if "environments" in state:
+        section = state["environments"]
+        environments = section.get("environments") if isinstance(section, dict) else None
+        if (not isinstance(environments, dict) or not environments
+                or any(not isinstance(item, dict) or not within(item.get("cwd"), project)
+                       for item in environments.values())):
+            return "cross_project_or_unknown_world_state"
+    return None
+
+
 def message(record):
     payload = record.get("payload")
     if not isinstance(payload, dict):
@@ -740,6 +789,15 @@ def recover(project, *, opt_in_project=None, review_id=None, session_refs=(), co
                             reader.stop("cross_project_or_unknown_turn")
                             state["status"] = "matched_prefix_only"
                             break  # Never read bodies after crossing to another project.
+                        continue
+                    if record.get("type") == "world_state":
+                        reason = world_state_stop_reason(record, project_key)
+                        if reason:
+                            reader.stop(reason)
+                            break
+                        if not reader.check_time():
+                            break
+                        reader.counts["recognized_world_state_skipped"] += 1
                         continue
                     if record.get("type") not in {"response_item", "event_msg"}:
                         reader.stop("unsupported_record")

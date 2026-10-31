@@ -1,7 +1,7 @@
 # Repo Rescue
 
 **Resume an abandoned coding project with evidence, a recovery plan, and a useful
-handoff.** Repo Rescue v0.2.3 is a Codex skill backed by local Python scanners.
+handoff.** Repo Rescue v0.2.4 is a Codex skill backed by local Python scanners.
 It has no website, service, telemetry, or runtime dependencies beyond Python and
 optional Git.
 
@@ -357,6 +357,8 @@ Malformed JSON, duplicate keys, invalid UTF-8, oversized records, unknown record
 types and project boundaries stop that file. The reader never skips a damaged or
 huge record, since it could hide a `turn_context` or new session. Known tool outputs,
 reasoning and system messages within supported envelopes are ignored as evidence.
+The explicitly recognized `world_state` subset below is skipped as comparison
+metadata. It consumes the same record, byte and time budgets.
 An oversized known message is omitted whole, with its omission reported. Redaction
 precedes excerpt truncation; sensitive values are not sliced before masking.
 
@@ -373,6 +375,38 @@ Recovery is chronological and can miss recent goals or reversals beyond the
 prefix. Explain these gaps in the resume summary and reactivation prompt; never
 claim full recovery, silently seek to the tail, raise limits, retry automatically,
 or persist raw history. Current Git/file evidence continues to take priority.
+
+### Recognized world-state metadata (v0.2.4)
+
+The public Codex [wire envelope](https://github.com/openai/codex/blob/main/codex-rs/history/src/rollout_payload.rs)
+and [WorldStateItem definition](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs)
+describe `type: world_state` with `payload: {full: boolean, state: object}`.
+This adapter recognizes a deliberately smaller subset:
+
+- The envelope contains only `type`, a valid timezone-aware `timestamp`, `payload`
+  and optional unsigned 64-bit `ordinal` (or null).
+- Payload contains exactly `full` and `state`. State section names are limited to
+  `model`, `tools`, `permissions`, `agents_md` and `environments`; each value must
+  be an object or null. Empty states and full/patch snapshots are supported.
+- An `environments` update must explicitly carry a nonempty `environments` map,
+  with an in-project `cwd` on every entry. Null removals or partial environment
+  patches without cwd stop recovery. This adapter does not reconstruct merge patches.
+- All nested `cwd` and `project_path` anchors are checked lexically. A conflicting,
+  invalid or removed anchor stops with `cross_project_or_unknown_world_state`.
+- Unknown fields/sections/types and structures beyond 4,096 visited values or
+  depth 64 stop with `unsupported_world_state`. Existing JSON/record limits still
+  apply first. Other unknown record types still stop with `unsupported_record`.
+
+Recognized records increment `recognized_world_state_skipped` in coverage. No
+world-state content becomes a goal, decision, historical claim, prompt instruction
+or returned excerpt. Metadata text is never executed. Byte/record/time accounting
+is unchanged; evidence for subsequent messages retains its original JSONL line
+and timestamp. This does not authenticate metadata or expand a project's scope.
+
+Session adapter version is bound into review IDs/cursors, so upgrading requires a
+fresh metadata shortlist and separate approval for each selected body. No recovery
+is retried automatically. Tests use generated fixtures only; compatibility with a
+particular private recording remains unverified until separately approved recovery.
 
 ### Locations and format boundary
 

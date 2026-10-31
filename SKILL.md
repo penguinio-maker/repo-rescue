@@ -5,7 +5,7 @@ metadata:
   short-description: Recover project context and plan the next steps
 ---
 
-# Repo Rescue v0.2.3
+# Repo Rescue v0.2.4
 
 Use Python 3.11+ and the bundled `scripts/inspect_project.py`. Git is optional.
 This skill supports **rescue** and **checkpoint**. Session recovery is optional and
@@ -21,6 +21,10 @@ the session module; never inspect later records to work around an unsupported he
 Large-session recovery streams an approved bounded prefix. Explain the read/text/time
 limits before body approval and report per-session EOF, unread bytes, omissions and
 stop reasons. Partial recovery can miss recent decisions; never describe it as complete.
+Recognized `world_state` comparison metadata may be skipped within the same budgets;
+it is never conversation evidence or authorization. Unknown/unsafe shapes and
+conflicting or unresolved project anchors still stop recovery. Use a fresh shortlist
+and body approval after an adapter upgrade; never reuse approval to bypass a stop.
 
 ## Boundaries
 
