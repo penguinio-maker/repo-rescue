@@ -9,7 +9,8 @@ metadata:
 
 Help the user resume work, not debug the scanner. Use Python 3.11+ and the installed
 scripts. Git is optional. Require an explicit project path; ask once if missing.
-Interpret “verbose” as a presentation preference, never permission for more access.
+Interpret “verbose” or “details” as presentation preferences, never permission for
+more access.
 
 ## Normal experience
 

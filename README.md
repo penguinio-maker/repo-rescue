@@ -60,7 +60,8 @@ If recovery is partial, the report adds just: “Some historical context may be 
 Use $repo-rescue to rescue '.' with optional past Codex session context.
 ```
 
-The skill first inspects the project, then:
+After project inspection, the standard read-only session workflow uses two
+skill-level approvals:
 
 1. Asks **once** to search local session metadata for this project across all batches,
    explaining locations and the total budget. Conversations stay unread.
@@ -116,7 +117,7 @@ Use $repo-rescue to rescue '.' in verbose mode.
 
 You can also ask “show details.” Details add source references, confidence,
 coverage, limits and diagnostic reasons without cluttering the normal report.
-It never grants additional access or bypasses approvals. Internal approval tokens
+Details never grant additional access or bypass approvals. Internal approval tokens
 can contain private metadata; keep diagnostic output local.
 
 For CLI users, existing scanners still return their full JSON contract. A separate
@@ -124,8 +125,8 @@ read-only presenter accepts already-collected JSON on stdin and returns a compac
 view; `--verbose` (or `--details`) includes the original evidence and diagnostics.
 For a matching-session report, `--all-sessions` expands only the safe metadata
 shortlist. Numbering stays stable and technical identifiers remain hidden.
-It does not scan, recover,
-write files or execute anything. Codex composes the final prose from the evidence.
+The presenter does not scan projects, recover sessions, write files or execute
+project commands. Codex composes the final prose from the evidence.
 
 ## Beta limits
 
