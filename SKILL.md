@@ -42,7 +42,9 @@ Interpret “verbose” as a presentation preference, never permission for more 
    changed, explain plainly and show fresh metadata before asking again. Never retry
    silently with broader access, larger budgets or different sessions.
 5. **Deliver the report below.** Compare historical statements against current
-   files. If bodies are declined, give the file-only report without pressure.
+   files. Explain meaningful gaps plainly: recovery reads a bounded prefix from the
+   beginning, so unsupported records and streaming limits may omit recent context.
+   If bodies are declined, give the file-only report without pressure.
 
 For a compact view of already-collected evidence, use `scripts/present_report.py`
 with JSON on stdin and no file output. Its numbered choices map to the original

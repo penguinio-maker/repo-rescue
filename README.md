@@ -4,42 +4,28 @@ Pick up an unfinished coding project with a clear next step.
 
 **Public beta v0.2.7.** Repo Rescue is a local Codex skill. It reads project files
 and Git history, optionally adds context from approved past Codex sessions, and
-gives you a short recovery report. No website, account, backend or pip dependencies.
+gives you a short recovery report. No cloud backend or pip dependencies.
 
-## Install
+## Install and use
 
-Requires Python 3.11+. Git is optional for inspection and required for this clone:
+You need Codex, Python 3.11+ and Git for installation. The inspected project does
+not need Git. Already installed? See [Update](#update).
+
+1. Run this in a terminal (macOS/Linux or PowerShell):
 
 ```sh
-git clone https://github.com/penguinio-maker/repo-rescue.git ~/.codex/skills/repo-rescue
-```
-
-PowerShell:
-
-```powershell
 git clone https://github.com/penguinio-maker/repo-rescue.git "$HOME/.codex/skills/repo-rescue"
 ```
 
-With a custom `CODEX_HOME`, install in its `skills/repo-rescue` folder instead.
-Start a new Codex session after installation. To update an existing installation:
-
-```sh
-git -C ~/.codex/skills/repo-rescue pull --ff-only
-```
-
-## Resume a project
-
-Give Codex the project path explicitly. For the current folder:
+2. Open your unfinished project's folder in Codex and start a new chat.
+3. Paste this, with `'.'` explicitly selecting that project folder:
 
 ```text
 Use $repo-rescue to rescue the project at '.'.
 ```
 
-Or use a relative or absolute path, quoting spaces. This fictional example is not bundled:
-
-```text
-Use $repo-rescue to rescue './examples/tiny-harbor'.
-```
+For another folder, replace `'.'` with its quoted path. With a custom `CODEX_HOME`,
+install in its `skills/repo-rescue` folder instead of the default above.
 
 You get a concise report: what the project is, where you left off, important past
 decisions, unresolved problems, **three next actions**, and evidence/confidence.
@@ -60,7 +46,8 @@ The skill first inspects the project, then:
 
 No hashes, terminal flags or pagination knowledge are needed. Declining session
 access still gives you a useful file/Git report. Asking about session recovery does
-not approve transcript reading. New or changed sessions require fresh approval.
+not approve transcript reading. Approval covers only your selected sessions;
+changed selected files require fresh review and approval.
 
 Past requests and replies may contain private code, personal details or business
 context. Metadata and redacted excerpts may be processed remotely by the Codex
@@ -100,7 +87,10 @@ write files or execute anything. Codex composes the final prose from the evidenc
   unsupported formats may not match; the skill does not guess from message text.
 - Recovery streams a bounded chronological prefix. Unsupported records, scope
   changes, size/text/time limits or active-file changes can leave context incomplete.
-  The report must explain meaningful gaps. Old “tests passed” claims are not current tests.
+  It reads from the beginning, so the latest messages may be missing. Unsupported
+  or unsafe records stop recovery; the skill does not silently skip unknown content
+  or increase limits. The report must explain meaningful gaps. Old “tests passed”
+  claims are not current tests.
 - Redaction is best effort. Reports may still contain private context. Keep them local.
 - The synthetic Tiny Harbor regression recovers four known facts with source
   evidence. Synthetic tests do not establish compatibility with every real recording.
@@ -108,6 +98,14 @@ write files or execute anything. Codex composes the final prose from the evidenc
 Details: [session access and limits](references/session_recovery.md),
 [format compatibility](references/transcript_compatibility.md),
 [scanner/CLI technical guide](references/technical-guide.md).
+
+## Update
+
+```sh
+git -C "$HOME/.codex/skills/repo-rescue" pull --ff-only
+```
+
+Use your custom installation path if applicable, then start a new Codex chat.
 
 ## Development
 
