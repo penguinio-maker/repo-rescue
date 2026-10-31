@@ -62,15 +62,26 @@ Use $repo-rescue to rescue '.' with optional past Codex session context.
 
 The skill first inspects the project, then:
 
-1. Asks to search local session **metadata only**, explaining where and how much.
-2. Shows a few matching sessions by date, size and project-match confidence.
-3. Separately asks which exact conversations you approve reading.
+1. Asks **once** to search local session metadata for this project across all batches,
+   explaining locations and the total budget. Conversations stay unread.
+2. Searches within that approval automatically and shows a few relevant matches.
+3. Asks **once more** to read your exact selection: one session or several named together.
 4. Combines approved historical statements with current files in the recovery report.
 
 No hashes, terminal flags or pagination knowledge are needed. Declining session
 access still gives you a useful file/Git report. Asking about session recovery does
 not approve transcript reading. Approval covers only your selected sessions;
 changed selected files require fresh review and approval.
+
+There is no extra skill-level confirmation to run the ordinary read-only scanner.
+Codex may still require host permission prompts; Repo Rescue never bypasses them.
+Metadata search covers up to 500 sessions in one directory snapshot, 1 MiB per
+header and **8 MiB total across all batches**, with a cooperative 30-second budget.
+The inventory itself is capped at 5,000 entries and six directory levels. It stops
+at those bounds; it never silently restarts or adds newly appearing sessions.
+Changing the project, history location or budgets requires renewed consent.
+Body access remains a separate approval, up to 50 named sessions, 8 MiB each and
+16 MiB total per recovery. No approval tokens are saved.
 
 Past requests and replies may contain private code, personal details or business
 context. Metadata and redacted excerpts may be processed remotely by the Codex

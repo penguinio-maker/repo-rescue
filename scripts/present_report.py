@@ -116,6 +116,12 @@ def present(report, *, verbose=False):
         code = report['error'].get('code', '')
         message = ('The selected session changed. Review fresh metadata and approve again before reading.'
                    if code == 'selected_session_changed_rediscover_and_reapprove'
+                   else 'The search location or limits changed. Review the new scope and approve again.'
+                   if code == 'metadata_search_scope_changed_renew_approval'
+                   else 'The project or session location changed. Review the selection and approve again.'
+                   if code == 'approval_project_or_home_changed'
+                   else 'The recovery limits changed. Review them and approve again.'
+                   if code == 'approval_read_limits_changed'
                    else 'Session access needs explicit approval before continuing.' if 'approval' in code
                    else 'Inspection could not finish. Continue with available file evidence.')
         result = {'message': message}

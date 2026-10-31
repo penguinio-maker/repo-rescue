@@ -11,7 +11,65 @@ Use this only when the user explicitly requests local Codex session recovery for
 the selected project. An implementation/development request is not authorization
 to inspect the developer's real history. Test with synthetic fixtures only.
 
-## Gate 1: project-specific metadata matching
+## Preferred workflow: one aggregate metadata approval
+
+Ordinary inspection uses already-granted Codex host permissions. Do not add an
+assistant confirmation before running the read-only scanner. Host prompts remain
+mandatory when required; never disable policies, sandboxing or permission checks.
+
+For optional history, prepare a private in-memory plan:
+
+```text
+python -B <skill-directory>/scripts/search_sessions.py plan --project <path> --session-opt-in <same-path>
+```
+
+This stats only the known project/home directory identities. It does not enumerate
+session directories or read headers/bodies. Use the returned locations and limits
+for **one project-scoped metadata question**. Explain possible remote processing.
+That question also supplies project opt-in; do not ask a separate interest/opt-in
+question or an assistant confirmation to run the scope planner.
+The approved operation covers all available batches within: 500 sessions, 1 MiB
+per header, **8 MiB total header bytes**, 5,000 inventory entries, depth 6, and a
+cooperative 30-second processing budget checked between headers. Blocking OS calls
+and a current header read can outlast that timer. Keep the plan's ID internal.
+
+After approval:
+
+```text
+python -B <skill-directory>/scripts/search_sessions.py search --project <path> --session-opt-in <same-path> --approve-search <plan-approval-id>
+```
+
+Use the same `--codex-home <selected-home>` on both calls for a custom location.
+The coordinator inventories once, freezes those candidates, and processes batches
+of 50 with a shared reader/budget. Never request another assistant approval for an
+ordinary internal batch. Never extend this search with manual page calls. New
+files after the snapshot are excluded. Exhaustion, time/byte/session bounds and
+catalogue gaps are distinct in detailed coverage; never claim all history was read.
+
+The scope binds exact project/home paths, their directory identities and the
+disclosed aggregate/read limits. Internal batch size is not consent scope. Changes
+to approved scope require a new plan and renewed consent before any further
+enumeration/header access. A stopped search ends the approved operation: never
+silently restart it or reuse its ID for another operation. Plan IDs, like body
+approval IDs, are operator consent assertions, not signed authorization or
+persistent single-use credentials. Conversation gates remain the assistant's job.
+Do not persist the plan, IDs, inventory or transcripts.
+
+Then show the concise shortlist and ask **one separate body question** naming the
+exact selection (one or multiple sessions together, maximum 50). Joint approval
+maps to individual per-session IDs; repeat `--approve-bodies` and `--session` in
+one recovery call as below. Unrelated inventory changes never invalidate selected
+body consent. Selected-file growth/replacement and changed project/home/read limits
+still require fresh review and consent. Selected-header revalidation and streaming
+limits are unchanged; the search budget is not a new body-reading permission.
+
+## Legacy single-page API (advanced)
+
+Existing `discover`/`match` callers remain compatible. The per-page instructions
+below do not authorize aggregate search. Do not reuse old 50-header consent for
+the new all-batch operation or switch to legacy calls to bypass its stop conditions.
+
+### Gate 1: project-specific metadata matching
 
 Complete the ordinary read-only file/Git inspection first. Request explicit approval
 for metadata-only matching for this exact project. A generic recovery request or

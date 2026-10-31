@@ -63,6 +63,12 @@ the standalone CLI produces evidence JSON only.
 
 ## Standalone scanner
 
+For the normal optional-session flow, use the bounded all-batch coordinator in
+[session recovery](session_recovery.md#preferred-workflow-one-aggregate-metadata-approval).
+It uses one metadata approval, a frozen inventory and an 8 MiB shared header budget
+for up to 500 sessions. The single-page APIs documented below remain compatible
+for advanced callers; their page budgets must not be used to extend an approved search.
+
 From the installed skill directory:
 
 ```sh

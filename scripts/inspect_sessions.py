@@ -244,7 +244,7 @@ def decode_approvals(value):
         raise SessionError("invalid_transcript_approval") from None
 
 
-def discover(project, *, opt_in_project=None, codex_home=None, cursor=None):
+def discover(project, *, opt_in_project=None, codex_home=None, cursor=None, _catalogue=False):
     """Stat-only inventory. Never open a transcript, config, credential or database."""
     root = project_consent(project, opt_in_project)
     home, label = history_home(codex_home)
@@ -263,15 +263,16 @@ def discover(project, *, opt_in_project=None, codex_home=None, cursor=None):
         if exists:
             stack.append((folder, 0))
     # history.jsonl often lacks reliable project anchors. Do not open or mine it.
-    try:
-        index = checked_path(home / "history.jsonl")
-        if index.is_file():
-            info = index.stat()
-            locations.append({"location": f"{label}/history.jsonl", "exists": True,
-                              "size_bytes": info.st_size, "supported": False,
-                              "reason": "Prompt history has no supported reliable project matching schema."})
-    except (OSError, SessionError):
-        counts["unavailable_or_linked_location"] += 1
+    if not _catalogue:
+        try:
+            index = checked_path(home / "history.jsonl")
+            if index.is_file():
+                info = index.stat()
+                locations.append({"location": f"{label}/history.jsonl", "exists": True,
+                                  "size_bytes": info.st_size, "supported": False,
+                                  "reason": "Prompt history has no supported reliable project matching schema."})
+        except (OSError, SessionError):
+            counts["unavailable_or_linked_location"] += 1
     visited = 0
     while stack:
         folder, depth = stack.pop()
@@ -334,6 +335,14 @@ def discover(project, *, opt_in_project=None, codex_home=None, cursor=None):
     # Body approvals below still bind full size/mtime snapshots for the page.
     inventory = hashlib.sha256(json.dumps([[c["path"], c["snapshot"][:2]] for c in candidates],
                                          sort_keys=True).encode()).hexdigest()
+    if _catalogue:
+        # Internal coordinator snapshot: one bounded enumeration, no header reads
+        # or body approvals. The public paginated discover/match API is unchanged.
+        if cursor is not None:
+            raise SessionError("invalid_cursor")
+        return {"locations": locations, "candidates": candidates,
+                "coverage": {"complete": False, "entries_visited": min(visited, MAX_ENTRIES),
+                             "omissions": dict(counts), "limits": limits}}
     offset = 0
     if cursor is not None:
         try:
@@ -593,7 +602,7 @@ def match_metadata(project, *, opt_in_project=None, metadata_approval_project=No
             candidate["match_reason"] = "unreadable_metadata"
         counts[candidate["project_match"]] += 1
         reasons[candidate["match_reason"]] += 1
-    # Bind body approval to this page and its whitelisted, matching metadata.
+    # Bind body approval to each selected file and its matching metadata, not the page.
     report.update(status="body_approval_required" if counts["matched"] else "no_matching_sessions",
                   matching_sessions=[c for c in report["candidates"] if c["project_match"] == "matched"],
                   match_counts=dict(counts), bodies_read=False, metadata_records_only=True)
