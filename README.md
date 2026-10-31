@@ -1,15 +1,22 @@
 # Repo Rescue
 
-Pick up an unfinished coding project with a clear next step.
+**Your code is still there. The context isn't.**
 
-**Public beta v0.2.7.** Repo Rescue is a local Codex skill. It reads project files
-and Git history, optionally adds context from approved past Codex sessions, and
-gives you a short recovery report. No cloud backend or pip dependencies.
+Come back to a project after weeks away and remember why you made those choices,
+what is unfinished, and where to start next.
+
+Repo Rescue is a **Codex skill** for recovering past project decisions and
+unfinished work from local files, Git history and—with your permission—past Codex
+sessions. It separates historical intentions from what current files actually
+establish, then gives you three practical next steps.
+
+[Public beta v0.2.7](https://github.com/penguinio-maker/repo-rescue/releases/tag/v0.2.7)
+· Python standard library · Read-only by default · [MIT](LICENSE)
 
 ## Install and use
 
-You need Codex, Python 3.11+ and Git for installation. The inspected project does
-not need Git. Already installed? See [Update](#update).
+You need **Codex, Python 3.11+ and Git** to install. The project you rescue does
+not need Git history. There are no pip dependencies or cloud services to set up.
 
 1. Run this in a terminal (macOS/Linux or PowerShell):
 
@@ -18,31 +25,54 @@ git clone https://github.com/penguinio-maker/repo-rescue.git "$HOME/.codex/skill
 ```
 
 2. Open your unfinished project's folder in Codex and start a new chat.
-3. Paste this, with `'.'` explicitly selecting that project folder:
+3. Paste:
 
 ```text
 Use $repo-rescue to rescue the project at '.'.
 ```
 
-For another folder, replace `'.'` with its quoted path. With a custom `CODEX_HOME`,
-install in its `skills/repo-rescue` folder instead of the default above.
+The explicit path `'.'` means that project folder. Replace it with a quoted path
+to inspect another project. With a custom `CODEX_HOME`, install under its
+`skills/repo-rescue` directory instead. Already installed? See [Update](#update).
 
-You get a short report: the project, where you left off, previous decisions,
-meaningful unresolved problems and **three practical next steps**. Evidence stays
-available through details. The normal report aims for fewer than 200 words.
-Unknowns stay unknown. Nothing is installed, tested or edited by a rescue request.
+Basic rescue inspects files and Git only. It does not read conversations, run
+project commands or change project files.
 
-For example, with fictional project context:
+## Recover the decisions behind the code
+
+Files show the current state. Past sessions can explain the plan behind it:
+
+```text
+Use $repo-rescue to rescue '.' with optional past Codex session context.
+```
+
+The standard history workflow has **two skill-level approvals**:
+
+1. Approve a bounded, project-specific metadata search across all available batches.
+2. Choose one or several named sessions and separately approve reading their bodies.
+
+You see all matches up to ten; larger lists include oldest and newest choices,
+with “show all” available. Dates and sizes do not reveal contents or usefulness.
+Known active sessions are excluded; unavailable active status is marked unknown.
+Declining history access still gives you the file/Git report. Codex host permission
+prompts remain separate and are never bypassed.
+
+## Demo
+
+> **Real screenshot placeholder**
+>
+> A privacy-reviewed screenshot of a real recovery will go here. No product
+> screenshot has been added yet.
+
+Example output using **fictional project context**:
 
 > **Tiny Harbor** — A small fishing game about building a harbor.
 >
 > **Where you left off**
-> You planned timing-based fishing. The recovered context does not establish
-> whether it was implemented.
+> You planned timing-based fishing. Implementation is not established by the recovered context.
 >
 > **Previous decisions**
-> - A seven-minute day/night cycle.
-> - A maximum of three boats.
+> A seven-minute day/night cycle; at most three boats.
 >
 > **Unresolved**
 > Boats were reported to disappear after reloading.
@@ -52,101 +82,36 @@ For example, with fictional project context:
 > 2. Check how saved boats are restored.
 > 3. Verify that a fix keeps boats across a reload.
 
-If recovery is partial, the report adds just: “Some historical context may be missing.”
+Normal reports aim for fewer than 200 words. Ask **“show details”** for evidence
+and confidence. Partial recovery adds: “Some historical context may be missing.”
 
-## Optional past-session context
+## Privacy first
 
-```text
-Use $repo-rescue to rescue '.' with optional past Codex session context.
-```
+- **Read-only by default.** No automatic edits, installs, project tests or commits.
+- **Separate consent.** Metadata approval never grants transcript access. Changed
+  scope or selected files require renewed approval; tokens are not saved.
+- **Local scripts, informed model access.** Scripts make no network calls and do
+  not upload or persist transcripts. Approved context may be processed remotely
+  by Codex. Redaction is best effort; keep reports private.
+- **Sensitive files excluded.** Secrets, `.env` files, credentials, dependencies,
+  symlinks and large/binary project files are excluded from inspection.
 
-After project inspection, the standard read-only session workflow uses two
-skill-level approvals:
+## Beta limitations
 
-1. Asks **once** to search local session metadata for this project across all batches,
-   explaining locations and the total budget. Conversations stay unread.
-2. Searches within that approval automatically and shows matching historical sessions.
-3. Asks **once more** to read your exact selection: one session or several named together.
-4. Combines approved historical statements with current files in the recovery report.
+Recovery is scoped and may be partial. Unsupported records or streaming limits
+can stop it before recent messages. Moved projects and unsupported formats may
+not match. Historical statements do not prove implementation or passing tests;
+current file/Git evidence takes priority.
 
-No hashes, terminal flags or pagination knowledge are needed. Declining session
-access still gives you a useful file/Git report. Asking about session recovery does
-not approve transcript reading. Approval covers only your selected sessions;
-changed selected files require fresh review and approval.
+[Session consent and read limits](references/session_recovery.md) ·
+[Format compatibility](references/transcript_compatibility.md) ·
+[CLI and scanner details](references/technical-guide.md)
 
-The shortlist shows **all matches up to ten**. With more, it includes both the
-oldest and newest sessions and offers “show all.” Each numbered row contains only
-an approximate date, size and active status. Dates and sizes cannot tell us what
-was discussed or which session is useful; no conversation is read to rank choices.
-The current active session is excluded when identified by host/header metadata.
-If that identity is unavailable, the status is shown as unknown so you can choose
-sessions you know are historical. “Show all” keeps known active sessions excluded
-and does not read bodies or restart discovery. You can approve several choices
-together, such as “Read sessions 1, 4 and 7.”
+## Leave a handoff
 
-There is no extra skill-level confirmation to run the ordinary read-only scanner.
-Codex may still require host permission prompts; Repo Rescue never bypasses them.
-Metadata search covers up to 500 sessions in one directory snapshot, 1 MiB per
-header and **8 MiB total across all batches**, with a cooperative 30-second budget.
-The inventory itself is capped at 5,000 entries and six directory levels. It stops
-at those bounds; it never silently restarts or adds newly appearing sessions.
-Changing the project, history location or budgets requires renewed consent.
-Body access remains a separate approval, up to 50 named sessions, 8 MiB each and
-16 MiB total per recovery. No approval tokens are saved.
-
-Past requests and replies may contain private code, personal details or business
-context. Metadata and redacted excerpts may be processed remotely by the Codex
-model. The local scripts make no network requests or automatic uploads, and save
-no transcripts or reports. Local scanning does not mean offline model processing.
-
-## Save a handoff
-
-```text
-Use $repo-rescue to checkpoint '.'.
-```
-
-Codex previews the exact Markdown destination and full handoff, including a
-reactivation prompt, then asks before writing. No automatic overwrite, commit or
-publication. Reading session context does not grant permission to save a handoff.
-
-## More detail when you need it
-
-```text
-Use $repo-rescue to rescue '.' in verbose mode.
-```
-
-You can also ask “show details.” Details add source references, confidence,
-coverage, limits and diagnostic reasons without cluttering the normal report.
-Details never grant additional access or bypass approvals. Internal approval tokens
-can contain private metadata; keep diagnostic output local.
-
-For CLI users, existing scanners still return their full JSON contract. A separate
-read-only presenter accepts already-collected JSON on stdin and returns a compact
-view; `--verbose` (or `--details`) includes the original evidence and diagnostics.
-For a matching-session report, `--all-sessions` expands only the safe metadata
-shortlist. Numbering stays stable and technical identifiers remain hidden.
-The presenter does not scan projects, recover sessions, write files or execute
-project commands. Codex composes the final prose from the evidence.
-
-## Beta limits
-
-- Inspection is scoped, not a complete audit. Secrets, `.env` files, credentials,
-  dependency trees, links and large/binary files are excluded.
-- Session search uses structured project-path evidence. Renamed/moved projects or
-  unsupported formats may not match; the skill does not guess from message text.
-- Recovery streams a bounded chronological prefix. Unsupported records, scope
-  changes, size/text/time limits or active-file changes can leave context incomplete.
-  It reads from the beginning, so the latest messages may be missing. Unsupported
-  or unsafe records stop recovery; the skill does not silently skip unknown content
-  or increase limits. The report must explain meaningful gaps. Old “tests passed”
-  claims are not current tests.
-- Redaction is best effort. Reports may still contain private context. Keep them local.
-- The synthetic Tiny Harbor regression recovers four known facts with source
-  evidence. Synthetic tests do not establish compatibility with every real recording.
-
-Details: [session access and limits](references/session_recovery.md),
-[format compatibility](references/transcript_compatibility.md),
-[scanner/CLI technical guide](references/technical-guide.md).
+Ask `Use $repo-rescue to checkpoint '.'.` Codex previews the exact destination and
+full Markdown, including a reactivation prompt, then asks before writing. Session
+consent never approves that write; nothing is automatically committed or published.
 
 ## Update
 
@@ -162,6 +127,9 @@ Use your custom installation path if applicable, then start a new Codex chat.
 python -B -m unittest discover -s tests -v
 ```
 
-Use generated synthetic fixtures only; never inspect real history during development.
-Follow [AGENTS.md](AGENTS.md): test, privacy-review, commit intended source changes
-and push successful checks. MIT licensed; see [LICENSE](LICENSE).
+The [test workflow](https://github.com/penguinio-maker/repo-rescue/actions/workflows/tests.yml)
+is configured for Windows, Linux and macOS with Python 3.11 and the latest stable
+Python 3. Follow the link for actual CI results.
+
+Use generated synthetic history only; never inspect real private sessions during
+development. Follow [AGENTS.md](AGENTS.md) for tests, privacy review and publication.
