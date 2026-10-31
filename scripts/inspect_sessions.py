@@ -36,7 +36,7 @@ MAX_EXTRACTED_CHARS = 16 * 1024
 MAX_PROCESS_SECONDS = 30
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_METADATA_TOTAL_BYTES = 8 * 1024 * 1024
-SESSION_ADAPTER = "0.2.4"
+SESSION_ADAPTER = "0.2.5"
 WORLD_STATE_SECTIONS = {"model", "tools", "permissions", "agents_md", "environments"}
 FILE_NAME = re.compile(r"(?:rollout|session)-[A-Za-z0-9_.-]+\.jsonl$")
 LABELS = {
@@ -53,9 +53,11 @@ KEYWORDS = {
 
 
 class SessionError(ValueError):
-    def __init__(self, code):
+    def __init__(self, code, *, session_ref=None, reason=None):
         super().__init__(code)
         self.code = code
+        self.session_ref = session_ref
+        self.reason = reason
 
 
 def timestamp(value):
@@ -150,6 +152,94 @@ def history_home(explicit=None):
 
 def identity(info):
     return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def approval_limits():
+    return [SESSION_ADAPTER, MAX_FILE_BYTES, MAX_TOTAL_BYTES, MAX_LINE_BYTES, MAX_RECORDS,
+            MAX_FINDINGS, MAX_SNIPPET, MAX_MESSAGE_CHARS, MAX_INPUT_TEXT_CHARS,
+            MAX_EXTRACTED_CHARS, MAX_PROCESS_SECONDS, MAX_METADATA_BYTES, MAX_METADATA_TOTAL_BYTES]
+
+
+def approval_scope(root, home):
+    def file_id(path):
+        try:
+            return identity(path.lstat())[:2]
+        except FileNotFoundError:
+            return None
+    return digest([path_key(str(root)), file_id(root), path_key(str(home)), file_id(home)])
+
+
+def reviewed_metadata(candidate):
+    return {key: candidate.get(key) for key in (
+        "header_digest", "project_match", "match_basis", "confidence", "metadata", "session_started_at")}
+
+
+def encode_approvals(entries):
+    return base64.b64encode(json.dumps({"version": 1, "approvals": entries}, sort_keys=True).encode()).decode()
+
+
+def issue_approvals(report, root, home, *, metadata=False):
+    entries = []
+    for candidate in report["candidates"]:
+        if metadata and candidate["project_match"] != "matched":
+            continue
+        entry = {"ref": candidate["session_ref"], "path": candidate["path"],
+                 "snapshot": candidate["snapshot"], "scope": approval_scope(root, home),
+                 "limits": digest(approval_limits()), "mode": "metadata" if metadata else "stat",
+                 "reviewed": digest(reviewed_metadata(candidate)) if metadata else None}
+        candidate["approval_id"] = encode_approvals([entry])
+        entries.append(entry)
+    # Compatibility transport only: validation uses entries for selected refs,
+    # never this bundle's contents or discovery-page state as a whole.
+    report["review_id"] = encode_approvals(entries)
+
+
+def decode_approvals(value):
+    try:
+        values = [value] if isinstance(value, str) else value
+        if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= 50:
+            raise ValueError
+        entries = {}
+        for token in values:
+            if not isinstance(token, str) or len(token) > 512 * 1024:
+                raise ValueError
+            decoded = json.loads(base64.b64decode(token, validate=True))
+            if (not isinstance(decoded, dict) or set(decoded) != {"version", "approvals"}
+                    or type(decoded["version"]) is not int or decoded["version"] != 1
+                    or not isinstance(decoded["approvals"], list) or len(decoded["approvals"]) > 50):
+                raise ValueError
+            for entry in decoded["approvals"]:
+                if not isinstance(entry, dict) or set(entry) != {"ref", "path", "snapshot", "scope", "limits", "mode", "reviewed"}:
+                    raise ValueError
+                rel = entry["path"]
+                parts = rel.split("/") if isinstance(rel, str) else []
+                if (not 2 <= len(parts) <= MAX_DEPTH + 2 or parts[0] not in {"sessions", "archived_sessions"}
+                        or any(not part or part in {".", ".."} or "\\" in part or ":" in part
+                               or SENSITIVE_NAME.search(part) or part.lower() in EXCLUDED_DIRS - {"sessions"}
+                               for part in parts[1:])
+                        or not FILE_NAME.fullmatch(parts[-1]) or redact(rel) != rel
+                        or entry["ref"] != hashlib.sha256(rel.encode()).hexdigest()[:16]
+                        or not isinstance(entry["snapshot"], list) or len(entry["snapshot"]) != 4
+                        or any(type(number) is not int or number < 0 for number in entry["snapshot"])
+                        or entry["mode"] not in {"stat", "metadata"}
+                        or any(not isinstance(entry[key], str) or not re.fullmatch(r"[0-9a-f]{64}", entry[key])
+                               for key in ("scope", "limits"))
+                        or (entry["mode"] == "metadata" and (not isinstance(entry["reviewed"], str)
+                            or not re.fullmatch(r"[0-9a-f]{64}", entry["reviewed"])))
+                        or (entry["mode"] == "stat" and entry["reviewed"] is not None)):
+                    raise ValueError
+                if entry["ref"] in entries and entries[entry["ref"]] != entry:
+                    raise ValueError
+                entries[entry["ref"]] = entry
+                if len(entries) > 50:
+                    raise ValueError
+        return entries
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        raise SessionError("invalid_transcript_approval") from None
 
 
 def discover(project, *, opt_in_project=None, codex_home=None, cursor=None):
@@ -268,7 +358,7 @@ def discover(project, *, opt_in_project=None, codex_home=None, cursor=None):
                   "catalogued": total, "next_cursor": next_cursor}
     material = [str(root), str(home), locations, candidates, dict(counts), limits, pagination, inventory]
     review_id = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
-    return {"schema_version": "1.0", "status": "body_approval_required", "project": ".",
+    report = {"schema_version": "1.0", "status": "body_approval_required", "project": ".",
             "review_id": review_id, "locations": locations, "candidates": candidates,
             "pagination": pagination,
             "bodies_read": False, "coverage": {"complete": False, "entries_visited": min(visited, MAX_ENTRIES),
@@ -277,6 +367,8 @@ def discover(project, *, opt_in_project=None, codex_home=None, cursor=None):
             "privacy_notice": "Recovery is optional per project. Approve selected session_ref values in a separate step. "
                 "Redacted excerpts may contain private context and may be processed remotely by your Codex model. "
                 "No transcript is uploaded or persisted by this script."}
+    issue_approvals(report, root, home)
+    return report
 
 
 class MetadataReader:
@@ -450,15 +542,16 @@ class MetadataReader:
         return record, hashlib.sha256(data).hexdigest()
 
 
-def match_metadata(project, *, opt_in_project=None, metadata_approval_project=None, codex_home=None, cursor=None):
+def match_metadata(project, *, opt_in_project=None, metadata_approval_project=None, codex_home=None, cursor=None,
+                   _inventory=None, _reader=None):
     root = project_consent(project, opt_in_project)
     if metadata_approval_project is None:
         raise SessionError("metadata_approval_required")
     project_consent(root, metadata_approval_project)
-    report = discover(root, opt_in_project=root, codex_home=codex_home, cursor=cursor)
+    report = _inventory if _inventory is not None else discover(root, opt_in_project=root, codex_home=codex_home, cursor=cursor)
     home, _ = history_home(codex_home)
     key = path_key(str(root))
-    reader = MetadataReader()
+    reader = _reader if _reader is not None else MetadataReader()
     counts = Counter({name: 0 for name in ("matched", "unmatched", "unresolved", "unsupported")})
     reasons = Counter()
     for candidate in report["candidates"]:
@@ -499,12 +592,12 @@ def match_metadata(project, *, opt_in_project=None, metadata_approval_project=No
         counts[candidate["project_match"]] += 1
         reasons[candidate["match_reason"]] += 1
     # Bind body approval to this page and its whitelisted, matching metadata.
-    report["review_id"] = hashlib.sha256(json.dumps([report["review_id"], report["candidates"]], sort_keys=True).encode()).hexdigest()
     report.update(status="body_approval_required" if counts["matched"] else "no_matching_sessions",
                   matching_sessions=[c for c in report["candidates"] if c["project_match"] == "matched"],
                   match_counts=dict(counts), bodies_read=False, metadata_records_only=True)
     report["coverage"].update(metadata_bytes_read=reader.bytes_read, matching_reasons=dict(reasons),
                              scope="Initial session_meta records only, for this page. No conversation bodies read.")
+    issue_approvals(report, root, home, metadata=True)
     return report
 
 
@@ -718,19 +811,47 @@ def recover(project, *, opt_in_project=None, review_id=None, session_refs=(), co
     root = project_consent(project, opt_in_project)
     if not review_id or not session_refs:
         raise SessionError("body_approval_required")
-    if metadata_approval_project is None:
-        inventory = discover(root, opt_in_project=root, codex_home=codex_home, cursor=cursor)
-    else:
-        inventory = match_metadata(root, opt_in_project=root, metadata_approval_project=metadata_approval_project,
-                                   codex_home=codex_home, cursor=cursor)
-    if inventory["review_id"] != review_id:
-        raise SessionError("inventory_changed_rediscover_and_reapprove")
-    catalogue = {c["session_ref"]: c for c in inventory["candidates"]}
-    if any(ref not in catalogue or not catalogue[ref]["body_eligible"]
-           or (metadata_approval_project is not None and catalogue[ref]["project_match"] != "matched")
-           for ref in session_refs):
+    if not isinstance(session_refs, (list, tuple)) or not 1 <= len(session_refs) <= 50:
+        raise SessionError("invalid_session_selection")
+    approvals = decode_approvals(review_id)
+    if any(ref not in approvals for ref in session_refs):
         raise SessionError("unapproved_or_ineligible_session")
     home, _ = history_home(codex_home)
+    catalogue = {}
+    metadata_reader = MetadataReader()
+    for ref in dict.fromkeys(session_refs):
+        entry = approvals[ref]
+        if entry["scope"] != approval_scope(root, home):
+            raise SessionError("approval_project_or_home_changed", session_ref=ref)
+        if entry["limits"] != digest(approval_limits()):
+            raise SessionError("approval_read_limits_changed", session_ref=ref)
+        if entry["mode"] == "metadata" and metadata_approval_project is None:
+            raise SessionError("metadata_approval_required")
+        try:
+            path = checked_path(home / entry["path"])
+            info = path.lstat()
+            snapshot = identity(info)
+            reason = ("replaced" if is_link(info) or not stat.S_ISREG(info.st_mode) or snapshot[:2] != entry["snapshot"][:2]
+                      else "grown" if snapshot[2] > entry["snapshot"][2]
+                      else "modified" if snapshot != entry["snapshot"] else None)
+        except (OSError, SessionError):
+            reason = "missing_or_unavailable"
+        if reason:
+            raise SessionError("selected_session_changed_rediscover_and_reapprove", session_ref=ref, reason=reason)
+        candidate = {"session_ref": ref, "path": entry["path"], "snapshot": snapshot,
+                     "size_bytes": snapshot[2], "body_eligible": True, "project_match": "not_read"}
+        if entry["mode"] == "metadata":
+            targeted = {"candidates": [candidate], "coverage": {"complete": False}, "review_id": ""}
+            checked = match_metadata(root, opt_in_project=root, metadata_approval_project=metadata_approval_project,
+                                     codex_home=home, _inventory=targeted, _reader=metadata_reader)
+            candidate = checked["candidates"][0]
+            if candidate.get("match_reason") == "metadata_batch_byte_limit":
+                raise SessionError("selected_metadata_batch_limit", session_ref=ref)
+            if candidate["project_match"] != "matched" or digest(reviewed_metadata(candidate)) != entry["reviewed"]:
+                raise SessionError("selected_session_changed_rediscover_and_reapprove", session_ref=ref,
+                                   reason="metadata_or_project_match_changed")
+        catalogue[ref] = candidate
+    inventory = {"coverage": {"complete": False, "scope": "Selected sessions only; discovery pages not replayed."}}
     current = Scanner(root).run()
     project_key = path_key(str(root))
     reader = RecordReader()
@@ -820,12 +941,12 @@ def recover(project, *, opt_in_project=None, review_id=None, session_refs=(), co
                         continue
                     if len(text.splitlines()) > 20:
                         reader.counts["message_line_limit"] += 1
-                    digest = hashlib.sha256(redact(text).encode()).digest()
+                    message_digest = hashlib.sha256(redact(text).encode()).digest()
                     for finding in extract(text, role):
                         if not reader.check_time():
                             break
                         fingerprint = (ref, role, finding["category"],
-                                       finding["statement"], digest, time)
+                                       finding["statement"], message_digest, time)
                         if fingerprint in seen:
                             continue
                         if len(findings) >= MAX_FINDINGS:
@@ -925,7 +1046,7 @@ def recover(project, *, opt_in_project=None, review_id=None, session_refs=(), co
                     "input_text_chars": MAX_INPUT_TEXT_CHARS, "extracted_chars": MAX_EXTRACTED_CHARS,
                     "processing_seconds": MAX_PROCESS_SECONDS,
                     "records_per_file": MAX_RECORDS, "findings": MAX_FINDINGS}},
-            "privacy_notice": inventory["privacy_notice"]}
+            "privacy_notice": "Only selected approved sessions were read. Redacted context may be private and processed remotely by Codex. No transcript is uploaded or persisted."}
 
 
 class Parser(argparse.ArgumentParser):
@@ -940,7 +1061,7 @@ def main(argv=None):
         parser.add_argument("--project", required=True)
         parser.add_argument("--session-opt-in", metavar="PROJECT", help="Explicit discovery consent for this exact project.")
         parser.add_argument("--codex-home", help="Optional explicitly selected Codex home; defaults to CODEX_HOME or ~/.codex.")
-        parser.add_argument("--approve-bodies", metavar="REVIEW_ID", help="Separate approval of the displayed inventory snapshot.")
+        parser.add_argument("--approve-bodies", action="append", metavar="APPROVAL_ID", help="Per-session approval_id; repeat for selected sessions.")
         parser.add_argument("--approve-metadata", metavar="PROJECT", help="Explicit approval of bounded initial metadata matching for this project.")
         parser.add_argument("--cursor", help="Opaque next_cursor from discovery or matching; omit for the first page.")
         parser.add_argument("--session", action="append", default=[], help="Selected session_ref from the displayed inventory.")
@@ -965,7 +1086,12 @@ def main(argv=None):
         print(json.dumps(result, indent=2, ensure_ascii=True))
         return 0
     except SessionError as error:
-        print(json.dumps({"error": {"code": error.code}, "bodies_read": False}))
+        detail = {"code": error.code}
+        if error.session_ref is not None:
+            detail["session_ref"] = error.session_ref
+        if error.reason is not None:
+            detail["reason"] = error.reason
+        print(json.dumps({"error": detail, "bodies_read": False}))
         return 2
     except (OSError, RuntimeError):
         print(json.dumps({"error": {"code": "session_inspection_unavailable"}, "bodies_read": None}))

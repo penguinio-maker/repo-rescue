@@ -1,7 +1,7 @@
 # Repo Rescue
 
 **Resume an abandoned coding project with evidence, a recovery plan, and a useful
-handoff.** Repo Rescue v0.2.4 is a Codex skill backed by local Python scanners.
+handoff.** Repo Rescue v0.2.5 is a Codex skill backed by local Python scanners.
 It has no website, service, telemetry, or runtime dependencies beyond Python and
 optional Git.
 
@@ -229,12 +229,12 @@ The ordinary `scripts/inspect_project.py` does not invoke or import it.
    metadata records. `match` requires both `--session-opt-in` and
    `--approve-metadata`, each naming the same explicit project. It returns a
    matching shortlist with `session_ref`, relative path, start/modification dates,
-   size, confidence, body eligibility and `review_id`. No conversation records are
+   size, confidence, body eligibility and per-session `approval_id`. No conversation records are
    read. Unrelated cwd/project_path values are not displayed.
 2. **Transcript approval:** after reviewing the shortlist, separately authorize
-   each selected eligible match. `recover` requires the displayed review ID, the same
+   each selected eligible match. `recover` requires its displayed approval ID, the same
    project and metadata approval flags, and explicit `--session` values. Body
-   approval is bound to a fresh page snapshot; changed headers, sizes or mtimes
+   approval is bound to that session's reviewed snapshot; changed headers, sizes or mtimes
    require a new shortlist and approval. Matching cannot be combined with body
    approval in one action.
 
@@ -245,11 +245,14 @@ CLI examples, from the installed skill directory:
 python -B scripts/inspect_sessions.py match --project ../moon-garden --session-opt-in ../moon-garden --approve-metadata ../moon-garden
 
 # Later: only after reviewing metadata and separately approving selected bodies.
-python -B scripts/inspect_sessions.py recover --project ../moon-garden --session-opt-in ../moon-garden --approve-metadata ../moon-garden --approve-bodies REVIEW_ID --session SESSION_REF
+python -B scripts/inspect_sessions.py recover --project ../moon-garden --session-opt-in ../moon-garden --approve-metadata ../moon-garden --approve-bodies APPROVAL_ID --session SESSION_REF
 ```
 
-`REVIEW_ID` and `SESSION_REF` stand for the values displayed in the shortlist; they
-are not reusable blanket approvals. Repeat `--session` to select more candidates.
+`APPROVAL_ID` and `SESSION_REF` are the values for one selected session, not blanket
+approvals. Repeat both `--approve-bodies` and `--session` for separately approved
+sessions, including sessions discovered on different pages. The `review_id` field
+remains a compatibility bundle of independent entries; only explicitly selected
+entries are validated. v0.2.4 page hashes are not accepted by this release.
 All session commands accept `--codex-home <selected-directory>` for a user-selected home.
 Otherwise they use an absolute `CODEX_HOME` or `~/.codex`; no other profiles, drives
 or home directories are searched. Supplying only `--project` to this module
@@ -301,8 +304,8 @@ Metadata can still be private, even with this minimization.
 
 Each page matches at most **50 sessions**. Append the returned
 `pagination.next_cursor` as `--cursor CURSOR` to `match` (or stat-only `discover`)
-for the next page. Use that same cursor when recovering a later-page shortlist.
-Review IDs are page-specific. Counts describe that page only; an empty page
+for the next page. Recovery does not replay pagination: omit its cursor; an old
+`--cursor` is accepted but ignored by recovery. Counts describe that page only; an empty page
 shortlist does not establish that all history is unrelated.
 
 Pagination deterministically sorts the bounded catalogue. Cursors bind project,
@@ -311,7 +314,8 @@ no raw paths or transcripts. Body appends do not invalidate page position. New,
 removed or replaced catalogue files require restarting pagination. Each call
 re-enumerates at most 5,000 entries, depth 6, without reading off-page headers.
 Entry/depth/read omissions remain visible; pagination is not an exhaustive-history
-claim. Body review IDs still bind the page's size/mtime/header snapshots, so active
+claim. Body approval IDs bind each selected file's identity, path, size/mtime and
+reviewed metadata; unrelated catalogue changes do not invalidate them. Selected
 transcripts changing between shortlist and recovery require fresh body approval.
 Continue pages only within the user's approved metadata scope.
 
@@ -325,6 +329,31 @@ Review IDs and cursors bind the new limits, so upgrades require a fresh shortlis
 and body approval. Earlier small-file approvals do not authorize larger reads.
 
 ### Bounded large-session recovery
+
+v0.2.5 approval validation is independent of discovery membership, page size,
+cursor, ordering and unrelated timestamps. Tokens bind the resolved project and
+Codex-home paths and directory identities (as digests), selected relative path and
+session reference, device/file identity, size/mtime, metadata digest/project-match
+evidence, adapter version and read limits. Recovery opens only selected headers
+for revalidation; aggregate metadata/body budgets remain bounded. A replaced
+project directory or Codex home, replay against another session, or changed read
+limits is rejected. Selected-file growth is rejected under the strict snapshot
+policy, even if only an append occurred.
+
+`selected_session_changed_rediscover_and_reapprove` names the affected `session_ref`
+and a reason: `grown`, `modified`, `replaced`, `missing_or_unavailable`, or
+`metadata_or_project_match_changed`. Scope/limit changes have separate
+`approval_project_or_home_changed` / `approval_read_limits_changed` errors. No
+body is read when preflight fails. Changes during streaming still discard findings.
+
+Tokens are bounded base64 JSON, not encrypted, signed or authenticated. They contain
+relative history filenames and private metadata digests; do not publish or persist
+them. Flags still assert operator consent, enforced conversationally by the skill.
+Stat-only legacy approvals bind the reviewed `not_read` association and snapshot;
+they cannot attest unread headers. Normal recovery requires metadata matching and
+its separate body approval, which binds the reviewed header and project match.
+Snapshots do not authenticate same-size body edits with restored timestamps;
+metadata digests cover headers only. Actively hostile filesystems remain out of scope.
 
 The reader processes one JSONL record at a time from the beginning, without
 collecting the transcript or reading ahead past record boundaries. It can recover

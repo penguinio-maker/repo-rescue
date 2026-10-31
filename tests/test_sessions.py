@@ -93,13 +93,13 @@ class SessionCase(unittest.TestCase):
         with patch.object(Path, "open", side_effect=AssertionError("body opened")):
             with self.assertRaisesRegex(sessions.SessionError, "body_approval_required"):
                 sessions.recover(self.root, opt_in_project=self.root, codex_home=self.home)
-            with self.assertRaisesRegex(sessions.SessionError, "inventory_changed"):
+            with self.assertRaisesRegex(sessions.SessionError, "invalid_transcript_approval"):
                 sessions.recover(self.root, opt_in_project=self.root, codex_home=self.home,
                                  review_id="wrong", session_refs=[inventory["candidates"][0]["session_ref"]])
         with path.open("a", encoding="utf-8") as out:
             out.write(json.dumps(self.msg("Next: fictional extra step")) + "\n")
         with patch.object(Path, "open", side_effect=AssertionError("changed body opened")):
-            with self.assertRaisesRegex(sessions.SessionError, "inventory_changed"):
+            with self.assertRaisesRegex(sessions.SessionError, "selected_session_changed"):
                 self.recover(inventory)
 
     def test_approval_cannot_transfer_projects_or_select_unknown_files(self):
@@ -108,7 +108,7 @@ class SessionCase(unittest.TestCase):
         other = self.base / "other-project"
         other.mkdir()
         with patch.object(Path, "open", side_effect=AssertionError("unapproved transcript opened")):
-            with self.assertRaisesRegex(sessions.SessionError, "inventory_changed"):
+            with self.assertRaisesRegex(sessions.SessionError, "approval_project_or_home_changed"):
                 sessions.recover(other, opt_in_project=other, codex_home=self.home,
                     review_id=inventory["review_id"], session_refs=[inventory["candidates"][0]["session_ref"]])
             with self.assertRaisesRegex(sessions.SessionError, "unapproved_or_ineligible"):
@@ -363,17 +363,20 @@ class SessionCase(unittest.TestCase):
                 self.inventory()
 
     def test_changed_during_read_discards_all_claims(self):
-        self.write([self.header(), self.msg("Goal: SHOULD_BE_DISCARDED")])
+        path = self.write([self.header(), self.msg("Goal: SHOULD_BE_DISCARDED")])
         inventory = self.inventory()
         original = sessions.identity
-        calls = 0
+        reading = False
+        original_open = Path.open
+        def opened(target, *args, **kwargs):
+            nonlocal reading
+            if target == path:
+                reading = True
+            return original_open(target, *args, **kwargs)
         def changed(info):
-            nonlocal calls
-            calls += 1
             result = original(info)
-            # Discovery and the pre-open check precede the post-read check.
-            return result if calls <= 2 else result[:-1] + [result[-1] + 1]
-        with patch.object(sessions, "identity", side_effect=changed):
+            return result if not reading else result[:-1] + [result[-1] + 1]
+        with patch.object(sessions, "identity", side_effect=changed), patch.object(Path, "open", opened):
             report = self.recover(inventory)
         self.assertFalse(self.findings(report))
         self.assertFalse(report["evidence"])
@@ -1139,6 +1142,135 @@ class WorldStateCase(unittest.TestCase):
         recovered = sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
             codex_home=self.home, review_id=report["review_id"], session_refs=[report["matching_sessions"][0]["session_ref"]])
         self.assertTrue(recovered["context"]["user_goals"])
+
+
+class ScopedApprovalCase(unittest.TestCase):
+    setUp = SessionCase.setUp
+    header = SessionCase.header
+    msg = SessionCase.msg
+    write = SessionCase.write
+
+    def shortlist(self):
+        return sessions.match_metadata(self.root, opt_in_project=self.root,
+            metadata_approval_project=self.root, codex_home=self.home)
+
+    def recover_selected(self, item, **kwargs):
+        return sessions.recover(self.root, opt_in_project=self.root,
+            metadata_approval_project=self.root, codex_home=self.home,
+            review_id=item['approval_id'], session_refs=[item['session_ref']], **kwargs)
+
+    def test_unrelated_growth_replacement_removal_and_page_changes_do_not_invalidate(self):
+        selected = self.write([self.header(), self.msg('Goal: selected fictional goal')], 'sessions/rollout-z-selected.jsonl')
+        other = self.write([self.header(), self.msg('Goal: unrelated')], 'sessions/rollout-a-other.jsonl')
+        with patch.object(sessions, 'MAX_FILES', 1):
+            first = self.shortlist()
+            second = sessions.match_metadata(self.root, opt_in_project=self.root,
+                metadata_approval_project=self.root, codex_home=self.home, cursor=first['pagination']['next_cursor'])
+        item = second['matching_sessions'][0]
+        self.assertEqual(item['path'], selected.relative_to(self.home).as_posix())
+        with other.open('ab') as stream:
+            stream.write(b'fictional append')
+        other.rename(other.with_suffix('.saved'))
+        other.write_text('{}\n', encoding='utf-8')
+        other.unlink()
+        self.write([self.header()], 'sessions/rollout-0-new.jsonl')
+        original = Path.open
+        def guarded(path, *args, **kwargs):
+            if path.is_relative_to(self.home):
+                self.assertEqual(path, selected, 'unselected header/body opened')
+            return original(path, *args, **kwargs)
+        with patch.object(sessions, 'discover', side_effect=AssertionError('inventory replayed')), patch.object(Path, 'open', guarded):
+            result = self.recover_selected(item, cursor=first['pagination']['next_cursor'])
+        self.assertEqual(result['context']['user_goals'][0]['statement'], 'Goal: selected fictional goal')
+
+    def test_bundle_compatibility_ignores_unselected_entry_changes(self):
+        path = self.write([self.header(), self.msg('Goal: chosen')], 'sessions/rollout-a-chosen.jsonl')
+        other = self.write([self.header()], 'sessions/rollout-b-other.jsonl')
+        report = self.shortlist()
+        item = next(c for c in report['candidates'] if c['path'] == path.relative_to(self.home).as_posix())
+        other.unlink()
+        recovered = sessions.recover(self.root, opt_in_project=self.root, metadata_approval_project=self.root,
+            codex_home=self.home, review_id=report['review_id'], session_refs=[item['session_ref']])
+        self.assertTrue(recovered['context']['user_goals'])
+
+    def test_selected_growth_rejected_without_opening_header_or_body(self):
+        path = self.write([self.header(), self.msg('Goal: old goal')])
+        item = self.shortlist()['matching_sessions'][0]
+        with path.open('ab') as stream:
+            stream.write(b'\n')
+        with patch.object(Path, 'open', side_effect=AssertionError('changed file opened')):
+            with self.assertRaises(sessions.SessionError) as caught:
+                self.recover_selected(item)
+        self.assertEqual(caught.exception.code, 'selected_session_changed_rediscover_and_reapprove')
+        self.assertEqual(caught.exception.reason, 'grown')
+        self.assertEqual(caught.exception.session_ref, item['session_ref'])
+
+    def test_replacement_and_missing_file_have_distinct_reasons(self):
+        path = self.write([self.header()])
+        item = self.shortlist()['matching_sessions'][0]
+        before = path.stat()
+        data = path.read_bytes()
+        path.rename(path.with_suffix('.saved'))
+        path.write_bytes(data)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with self.assertRaises(sessions.SessionError) as caught:
+            self.recover_selected(item)
+        self.assertEqual(caught.exception.reason, 'replaced')
+        path.unlink()
+        with self.assertRaises(sessions.SessionError) as caught:
+            self.recover_selected(item)
+        self.assertEqual(caught.exception.reason, 'missing_or_unavailable')
+
+    def test_project_anchor_changes_even_with_restored_stat_require_new_consent(self):
+        path = self.write([self.header()])
+        item = self.shortlist()['matching_sessions'][0]
+        before = path.stat()
+        path.write_bytes(path.read_bytes().replace(b'moon-garden', b'moon-planet'))
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with self.assertRaises(sessions.SessionError) as caught:
+            self.recover_selected(item)
+        self.assertEqual(caught.exception.reason, 'metadata_or_project_match_changed')
+
+    def test_replay_across_project_session_limits_and_project_identity_rejected(self):
+        self.write([self.header()])
+        item = self.shortlist()['matching_sessions'][0]
+        with patch.object(sessions, 'MAX_SNIPPET', 241):
+            with self.assertRaisesRegex(sessions.SessionError, 'approval_read_limits_changed'):
+                self.recover_selected(item)
+        with self.assertRaisesRegex(sessions.SessionError, 'unapproved_or_ineligible'):
+            sessions.recover(self.root, opt_in_project=self.root, codex_home=self.home,
+                review_id=item['approval_id'], session_refs=['another-session'])
+        other = self.base / 'other-project'
+        other.mkdir()
+        with self.assertRaisesRegex(sessions.SessionError, 'approval_project_or_home_changed'):
+            sessions.recover(other, opt_in_project=other, metadata_approval_project=other,
+                codex_home=self.home, review_id=item['approval_id'], session_refs=[item['session_ref']])
+        self.root.rename(self.root.with_name('old-project'))
+        self.root.mkdir()
+        with self.assertRaisesRegex(sessions.SessionError, 'approval_project_or_home_changed'):
+            self.recover_selected(item)
+
+    def test_repeat_cli_approvals_validate_each_selected_session(self):
+        self.write([self.header(), self.msg('Goal: one')], 'sessions/rollout-one.jsonl')
+        self.write([self.header(), self.msg('Goal: two')], 'sessions/rollout-two.jsonl')
+        items = self.shortlist()['matching_sessions']
+        command = [sys.executable, '-B', str(REPO / 'scripts' / 'inspect_sessions.py'), 'recover',
+            '--project', str(self.root), '--session-opt-in', str(self.root), '--approve-metadata', str(self.root),
+            '--codex-home', str(self.home)]
+        for item in items:
+            command += ['--session', item['session_ref'], '--approve-bodies', item['approval_id']]
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout)['resume_summary']['matched_sessions'], 2)
+
+    def test_untrusted_token_paths_are_rejected_before_history_detection(self):
+        self.write([self.header()])
+        item = self.shortlist()['matching_sessions'][0]
+        entry = next(iter(sessions.decode_approvals(item['approval_id']).values()))
+        entry['path'] = 'sessions/../auth.json'
+        with patch.object(sessions, 'history_home', side_effect=AssertionError('history detected')):
+            with self.assertRaisesRegex(sessions.SessionError, 'invalid_transcript_approval'):
+                sessions.recover(self.root, opt_in_project=self.root, review_id=sessions.encode_approvals([entry]),
+                    session_refs=[entry['ref']])
 
 
 if __name__ == "__main__":

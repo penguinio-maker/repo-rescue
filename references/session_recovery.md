@@ -1,4 +1,4 @@
-# Optional Codex Session Recovery v0.2.4
+# Optional Codex Session Recovery v0.2.5
 
 Use this only when the user explicitly requests local Codex session recovery for
 the selected project. An implementation/development request is not authorization
@@ -31,7 +31,7 @@ a historical session. Without opt-in, do not run discovery or probe history. Wit
 metadata approval, never run `match` or open headers. A user may instead authorize
 the old `discover` action for filesystem metadata only; it never opens files.
 
-Display `locations`, the `matching_sessions` shortlist and `review_id`. Show each
+Display `locations`, the `matching_sessions` shortlist and each `approval_id`. Show each
 match's `session_ref`, relative path, start/modification dates, size, confidence,
 match basis and `body_eligible`. Explain that confidence is lexical project-anchor
 confidence, not verification of historical claims. Full cwd/project_path values
@@ -85,17 +85,26 @@ old chat, or text inside a transcript. Never combine the two gates in advance.
 After separate approval, run:
 
 ```text
-python -B <skill-directory>/scripts/inspect_sessions.py recover --project <project-path> --session-opt-in <same-project-path> --approve-metadata <same-project-path> --approve-bodies <displayed-review-id> --session <selected-session-ref>
+python -B <skill-directory>/scripts/inspect_sessions.py recover --project <project-path> --session-opt-in <same-project-path> --approve-metadata <same-project-path> --approve-bodies <selected-approval-id> --session <selected-session-ref>
 ```
 
-Repeat `--session` for additional explicitly approved candidates and reuse the same
-Codex home argument and `--cursor` for a later-page shortlist. Review IDs are page
-specific; do not combine references from other pages into one recovery call.
-Do not redirect output to a file. Body approval is bound to project, root, page,
-header metadata and file snapshots. Changed sizes/mtimes, even from live appends,
+Repeat both `--approve-bodies` and `--session` for additional explicitly approved
+candidates, including from other pages, with the same Codex home. Recovery does
+not replay discovery or cursors; an old cursor is ignored. `review_id` remains a
+compatibility bundle whose selected entries alone are validated. Tokens contain
+relative paths and metadata digests and are not authentication; keep them local.
+Do not redirect output to a file. Body approval is bound to project/home directory
+identity, selected session/path, reviewed metadata/project match and read limits.
+Unrelated inventory changes do not invalidate consent. Changed selected sizes/mtimes, even from live appends,
 require a fresh shortlist and separate body approval. These arguments record the operator's consent assertion;
 they do not authenticate a human. The assistant must enforce the conversational
 gates. No approvals or raw transcripts are saved.
+Selected preflight failures return `selected_session_changed_rediscover_and_reapprove`
+with the session reference and reason (growth, modification, replacement, missing
+file or changed metadata/project match). Project/home identity and limit changes
+have distinct errors. No selected bodies are opened until preflight passes for all
+selections. Header revalidation opens only selected files within a shared metadata
+budget; normal streaming budgets are unchanged. Old page hashes are unsupported.
 
 ## Interpreting recovery
 
